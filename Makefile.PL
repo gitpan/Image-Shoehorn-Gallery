@@ -7,7 +7,7 @@ WriteMakefile(
 	       ABSTRACT => '') : (),
 	      'VERSION_FROM' => 'lib/Image/Shoehorn/Gallery.pm',
 	      'PREREQ_PM'    => {
-				 Image::Shoehorn                   => '1.4',
+				 Image::Shoehorn                   => '1.41',
 				 Image::Size                       => '2.99',
 				 Image::Info                       => '1.11',
 				 Image::IPTCInfo                   => '1.6',

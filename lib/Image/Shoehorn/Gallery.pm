@@ -85,9 +85,10 @@ Generates valid XHTML (strict) and CSS!
 use strict;
 package Image::Shoehorn::Gallery;
 
-$Image::Shoehorn::Gallery::VERSION = '0.2';
+$Image::Shoehorn::Gallery::VERSION = '0.21';
 
 use Carp;
+use Carp::Heavy;
 use Digest::MD5 qw (md5_hex);
 
 use DirHandle;
@@ -837,8 +838,9 @@ sub visit {
     my $loc = "$path/$_";
 
     if (-d $loc) {
-      &make_index($loc);
-      &visit($loc);
+      if (&make_index($loc)) {
+	&visit($loc);
+      }
     }
   }
 
@@ -858,10 +860,16 @@ sub make_index {
 
   my $src = __PACKAGE__->source_to_dest($path);
 
-  if ((! -d $cur_dest) && (! mkpath($cur_dest,$verbose,0755))) {
-    carp "Failed to make '$cur_dest', $!\n";
+  print STDERR "Making '$cur_dest'..."
+    if ($verbose);
+
+  if ((! -d $cur_dest) && (! mkpath($cur_dest,0,0755))) {
+    print STDERR "Failed to make '$cur_dest', $!\n";
     return 0;
   }
+
+  print STDERR "ok\n"
+    if ($verbose);
 
   #
 
@@ -884,6 +892,7 @@ sub make_index {
   my $filters = __PACKAGE__->filters("index");
 
   my $machine = Pipeline(
+			 "MySAX_Breadcrumbs",
 			 ((scalar(@{$filters})) ? @{$filters} : ()),
 			 $writer);
 
@@ -924,10 +933,31 @@ sub make_index {
 
   else {
     $xhtml->set_style(\qq(
-.directory { margin-bottom:5px;clear:left;}
-.file      { margin-bottom:5px;clear:left;}
+body {
+  background-color: #ffffff;
+  margin:0;
+}
+
+.breadcrumbs {
+ display:block;
+  background-color: #f5f5dc;
+  padding:5px;
+  margin-bottom:5px;
+  border-bottom: solid thin;
+}
+
+.breadcrumbs-spacer {
+
+}
+
+.directory { margin-bottom:5px;clear:left; padding: 5px;}
+
+.file      { margin-bottom:5px;clear:left;padding: 5px;}
+
 .thumbnail { display:block;width:100px;float:left;}
+
 .file ul   { float:left;}
+
 ));
   }
 
@@ -994,7 +1024,7 @@ sub make_index {
   #
 
   &make_slides($html);
-  return;
+  return 1;
 }
 
 sub make_slides {
@@ -1056,6 +1086,7 @@ sub make_slides {
       my $machine = Pipeline(
 			     $xsl,
 			     "MySAX_Image",
+			     "MySAX_Breadcrumbs",
 			     ((scalar(@{$filters})) ? @{$filters} : ()),
 			     $writer,
 			    );
@@ -1063,7 +1094,16 @@ sub make_slides {
       print STDERR "[make-slide] Making $html..."
 	if ($verbose);
 
-      $machine->parse_uri($index);
+      eval { $machine->parse_uri($index); };
+
+      if ($@) {
+	carp "Ack! Failed to parse $index, $@\n";
+
+	$output->close();
+	next;
+      }
+
+      $output->close();
 
       print STDERR "OK\n"
 	if ($verbose);
@@ -1197,6 +1237,10 @@ sub destination {
   return $dest;
 }
 
+sub url {
+  return $url;
+}
+
 sub cur_source {
   return $cur_source;
 }
@@ -1295,26 +1339,54 @@ They are provided as a reference in case you want to specify your own CSS styles
 
 =head2 "index" page
 
- .directory {
-             margin-bottom:5px;
-             clear:left;
-           }
+ body {
+      background-color: #ffffff;
+      margin:0;
+ }
 
- .file      {
-             margin-bottom:5px;
-             clear:left;
-           }
+ .breadcrumbs {
+               display:block;
+               background-color: #f5f5dc;
+               padding:5px;
+               margin-bottom:5px;
+               border-bottom: solid thin;
+  }
 
- .thumbnail {
-             display:block;
-             width:100px;float:left;
-           }
+ .breadcrumbs-spacer {}
 
- .file ul   { 
-             float:left;
-           }
+ .directory { margin-bottom:5px;clear:left; padding: 5px;}
+
+ .file      { margin-bottom:5px;clear:left;padding: 5px;}
+
+ .thumbnail { display:block;width:100px;float:left;}
+
+ .file ul   { float:left;}
 
 =head2 "image" page
+
+
+ body {
+        background-color: #ffffff;
+        margin:0;
+      }
+
+ .breadcrumbs {
+   display:block;
+   background-color: #f5f5dc;
+   padding:5px;
+   margin-bottom:5px;
+   border-bottom: solid thin;
+ }
+
+ .breadcrumbs-spacer {}
+
+ .directory {
+   padding: 5px;
+ }
+
+ .file {
+   padding: 5px;
+ }
 
  .menu {
         margin-bottom:5px;
@@ -1330,20 +1402,20 @@ They are provided as a reference in case you want to specify your own CSS styles
  }
 
  .menu-link-index {
-		   font-weight:600;
-                  }
+		 font-weight:600;
+ }
 
  .menu-link-next {
-		  padding-left : 10px;
-                 }
+		padding-left : 10px;
+ }
 
  .menu-link-next img {
-		     margin-left:15px;
+		margin-left:15px;
  }
 
  .content {
-          padding-top:20px;
-         }
+        padding-top:20px;
+      }
 
  .image { 
         position:absolute;
@@ -1356,6 +1428,7 @@ They are provided as a reference in case you want to specify your own CSS styles
  .meta { 
         min-width:150px;
         max-width:150px;
+        margin:5px;
  }  
 
  .links {
@@ -1400,7 +1473,7 @@ They are provided as a reference in case you want to specify your own CSS styles
         display:block; 
         padding:3px;
         border-bottom:solid thin;
- } 
+ }
 
  .exif-field { 
         color:#a52a2a;
@@ -1408,9 +1481,10 @@ They are provided as a reference in case you want to specify your own CSS styles
         border-bottom:solid thin #000;
         }
 
+
 =head1 VERSION
 
-0.2
+0.21
 
 =head1 AUTHOR
 
@@ -1418,17 +1492,11 @@ Aaron Straup Cope
 
 =head1 DATE
 
-July 31, 2002
+August 02, 2002
 
 =head1 TO DO
 
 =over 4
-
-=item *
-
-Add links to "parent" directory -- or breadcrumbs -- for indices; need to determine whether or not this is a XML::Filter::XML_Directory_2XHTML thing.
-
-I<Barring any unforeseen bugs, this will be the sole focus of version 0.2.1>
 
 =item *
 
@@ -1869,6 +1937,84 @@ sub add_metadata {
   return 1;
 }
 
+package MySAX_Breadcrumbs;
+use base qw (XML::SAX::Base);
+
+use File::Basename;
+
+sub start_element {
+  my $self = shift;
+  my $data = shift;
+
+  $self->SUPER::start_element($data);
+
+  if ($data->{Name} ne "body") {
+    return 1;
+  }
+
+  my $cur = Image::Shoehorn::Gallery->cur_destination();
+
+  if ($cur eq Image::Shoehorn::Gallery->destination()) {
+    return 1;
+  }
+
+  $cur = &dirname($cur);
+
+  my $dest = Image::Shoehorn::Gallery->destination();
+
+  $cur =~ s/^($dest)(.*)/$2/;
+
+  my ($parts,$count) = Breadcrumbs->get($cur);
+
+  $self->SUPER::start_element({Name=>"span",Attributes=>{
+							"{}class" => {
+								      Name         => "class",
+								      LocalName    => "class",
+								      Prefix       => "",
+								      NamespaceURI => "",
+								      Value        => "breadcrumbs",
+								     }
+						       }});
+  
+  $self->SUPER::characters({Data=>" "});
+
+  #
+
+  for (my $i = 0; $i < $count; $i++) {
+    $self->SUPER::start_element({Name=>"a",Attributes=>{
+							"{}href" => {
+								     Name=>"href",
+								     LocalName=>"href",
+								     Prefix=>"",
+								     NamespaceURI=>"",
+								     Value=>Image::Shoehorn::Gallery->url().join("/",@{$parts}[0..$i]),
+								    },
+						       }});
+    $self->SUPER::characters({Data=>($parts->[$i] || "top")});
+    $self->SUPER::end_element({Name=>"a"});
+    
+    unless ($i +1 == $count) {
+      $self->SUPER::start_element({Name=>"span",Attributes=>{
+							    "{}class" => {
+									  Name         => "class",
+									  LocalName    => "class",
+									  Prefix       => "",
+									  NamespaceURI => "",
+									  Value        => "breadcrumbs-spacer",
+								     },
+							     }});
+      
+      $self->SUPER::characters({Data=>" || "});
+      $self->SUPER::end_element({Name=>"span"});
+    }
+
+    # print STDERR "$i [$count] $parts->[$i] ... ".Image::Shoehorn::Gallery->url().join("/",@{$parts}[0..$i])."\n";
+  }
+
+  $self->SUPER::end_element({Name=>"span"});
+  return 1;
+}
+
 package MySAX_Scaled;
 use base qw (XML::SAX::Base);
 
@@ -1928,7 +2074,13 @@ sub parse_uri {
 
     my $sfile = join("/",Image::Shoehorn::Gallery->cur_destination(),Image::Shoehorn->scaled_name([$uri,$sname]));
 
-    # print STDERR "COMPARING '$uri' w/ '$sfile' \n";
+    
+    if ($sfile =~ /^(.*)(-default)(\.[^\.]+)$/) {
+      $sfile = $1.$3;
+    }
+    
+#    print STDERR "COMPARING '$uri' w/ '$sfile' \n";
+#    print STDERR (stat($uri))[9]." ... ".(stat($sfile))[9]."\n";
 
     if (Image::Shoehorn::Gallery->force() >= 2) {
       $to_scale{$sname} = $scales->{$sname};
@@ -1958,7 +2110,6 @@ sub parse_uri {
   #
 
   if (keys %to_scale) {
-
     if ($default) {
 
       # print STDERR "ORIGINAL ".join(",",(imgsize($uri))[0,1])."\n";
@@ -2132,6 +2283,28 @@ sub test {
   return 0;
 }
 
+package Breadcrumbs;
+
+my %crumbs = ();
+my %count  = ();
+
+sub get {
+  my $pkg = shift;
+
+  if (! $_[0]) {
+    return ([],1);
+  }
+
+  if (exists $crumbs{$_[0]}) {
+    return ($crumbs{$_[0]},$count{$_[0]});
+  }
+
+  @{$crumbs{$_[0]}} = split("/",$_[0]);
+  $count{$_[0]}     = scalar(@{$crumbs{$_[0]}});
+
+  return ($crumbs{$_[0]},$count{$_[0]});
+}
+
 package STYLESHEET;
 my $data = undef;
 
@@ -2181,11 +2354,11 @@ __DATA__
    </xsl:variable>
 
     <xsl:variable name  = "prev">
-     <xsl:value-of select = "/html/body/div[@id=$id]/preceding-sibling::*[1]/a/@href" />
+     <xsl:value-of select = "/html/body/div[@id=$id]/preceding-sibling::*[1][name()='div']/a/@href" />
     </xsl:variable>
 
     <xsl:variable name  = "next">
-     <xsl:value-of select = "/html/body/div[@id=$id]/following-sibling::*[1]/a/@href" />
+     <xsl:value-of select = "/html/body/div[@id=$id]/following-sibling::*[1][name()='div']/a/@href" />
     </xsl:variable>
 
     <xsl:variable name = "last" select = "count(/html/body/div[@class='file' or 'directory'])" />
@@ -2193,7 +2366,7 @@ __DATA__
     <xsl:variable name = "prev_title">
      <xsl:choose>
       <xsl:when test = "$prev != ''">
-       <xsl:value-of select = "/html/body/div[@id=$id]/preceding-sibling::*[1]/a" />
+       <xsl:value-of select = "/html/body/div[@id=$id]/preceding-sibling::*[1][@class='file' or 'directory']/a" />
       </xsl:when>
       <xsl:otherwise>
        <xsl:value-of select = "/html/body/div[@class='file' or 'directory'][position()=$last]/a" />
@@ -2226,7 +2399,7 @@ __DATA__
      <xsl:variable name = "next_title">
       <xsl:choose>
        <xsl:when test = "$next != ''">
-        <xsl:value-of select = "/html/body/div[@id=$id]/following-sibling::*[1]/a" />
+        <xsl:value-of select = "/html/body/div[@id=$id]/following-sibling::*[1][@class='file' or 'directory']/a" />
        </xsl:when>
        <xsl:otherwise>
         <xsl:value-of select = "/html/body/div[@class='file' or 'directory'][position()=1]/a" />
@@ -2240,7 +2413,7 @@ __DATA__
         <xsl:value-of select = "$next" />
        </xsl:when>
        <xsl:otherwise>
-        <xsl:value-of select = "/html/body/div[@class='file' or 'directory'][position()=1]/a/@href" />
+        <xsl:value-of select = "/html/body/div[position()=1]/a/@href" />
        </xsl:otherwise>
       </xsl:choose>
      </xsl:variable>
@@ -2269,6 +2442,31 @@ __DATA__
     <style type = "text/css">
       <![CDATA[ <!--
 .foo {}
+
+body {
+  background-color: #ffffff;
+  margin:0;
+}
+
+.breadcrumbs {
+ display:block;
+  background-color: #f5f5dc;
+  padding:5px;
+  margin-bottom:5px;
+  border-bottom: solid thin;
+}
+
+.breadcrumbs-space {
+  background-color: orange;
+}
+
+.directory {
+ padding: 5px;
+}
+
+.file {
+ padding: 5px;
+}
 
 .menu {
         margin-bottom:5px;
@@ -2310,6 +2508,7 @@ __DATA__
 .meta { 
         min-width:150px;
         max-width:150px;
+        margin:5px;
 }  
      
 .links {
@@ -2645,7 +2844,7 @@ __DATA__
  </xsl:template>
 
 <!-- ======================================================================
-     $Date: 2002/07/31 17:45:31 $
+     $Date: 2002/07/31 22:50:32 $
      ====================================================================== -->
 
 </xsl:stylesheet>
