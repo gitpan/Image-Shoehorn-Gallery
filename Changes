@@ -1,5 +1,15 @@
 Revision history for Perl extension Image::Shoehorn::Gallery
 
+0.22	Mon Sep 02 2002
+
+	- Added support for 'floating thumbnails' on index pages.
+
+	- Fixed a syntax error when testing [@class = 'file' or @class = 'directory']
+
+	- Added package LocalSAX_FloatingThumbs
+
+	- Renamed all the MySAX_* packages as LocalSAX_*
+
 0.21	Fri Aug 02 2002
 	
 	- Now adds a breadcrumbs style menu at the top of each page. Woot!

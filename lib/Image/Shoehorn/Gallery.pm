@@ -85,7 +85,7 @@ Generates valid XHTML (strict) and CSS!
 use strict;
 package Image::Shoehorn::Gallery;
 
-$Image::Shoehorn::Gallery::VERSION = '0.21';
+$Image::Shoehorn::Gallery::VERSION = '0.22';
 
 use Carp;
 use Carp::Heavy;
@@ -892,7 +892,8 @@ sub make_index {
   my $filters = __PACKAGE__->filters("index");
 
   my $machine = Pipeline(
-			 "MySAX_Breadcrumbs",
+			 "LocalSAX_FloatingThumbs",
+			 "LocalSAX_Breadcrumbs",
 			 ((scalar(@{$filters})) ? @{$filters} : ()),
 			 $writer);
 
@@ -950,9 +951,11 @@ body {
 
 }
 
-.directory { margin-bottom:5px;clear:left; padding: 5px;}
+.directory { margin:10px;float:left; padding: 5px;}
 
-.file      { margin-bottom:5px;clear:left;padding: 5px;}
+.file      { margin:10px;float:left;padding: 5px;}
+
+.spacer { clear:both; }
 
 .thumbnail { display:block;width:100px;float:left;}
 
@@ -1004,7 +1007,7 @@ body {
 
   #
 
-  $xhtml->set_handlers({file=>MySAX_Scaled->new(Handler=>$writer)});
+  $xhtml->set_handlers({file=>LocalSAX_Scaled->new(Handler=>$writer)});
 
   #
 
@@ -1030,11 +1033,11 @@ body {
 sub make_slides {
   my $index = shift;
 
-  if (! scalar(@{&MySAX_Scaled::files()})) {
+  if (! scalar(@{&LocalSAX_Scaled::files()})) {
     return 1;
   }
 
-  foreach my $img (@{&MySAX_Scaled::files()}) {
+  foreach my $img (@{&LocalSAX_Scaled::files()}) {
 
     # This is a bug, not a feature
     next if ($img =~ /^(.*)\.html$/);
@@ -1085,8 +1088,8 @@ sub make_slides {
 
       my $machine = Pipeline(
 			     $xsl,
-			     "MySAX_Image",
-			     "MySAX_Breadcrumbs",
+			     "LocalSAX_Image",
+			     "LocalSAX_Breadcrumbs",
 			     ((scalar(@{$filters})) ? @{$filters} : ()),
 			     $writer,
 			    );
@@ -1484,7 +1487,7 @@ They are provided as a reference in case you want to specify your own CSS styles
 
 =head1 VERSION
 
-0.21
+0.22
 
 =head1 AUTHOR
 
@@ -1492,7 +1495,7 @@ Aaron Straup Cope
 
 =head1 DATE
 
-August 02, 2002
+September 02, 2002
 
 =head1 TO DO
 
@@ -1624,7 +1627,7 @@ sub end_document {
     $parser->generate($results);
 }
 
-package MySAX_Image;
+package LocalSAX_Image;
 use base qw (XML::SAX::Base);
 
 use File::Basename;
@@ -1937,7 +1940,49 @@ sub add_metadata {
   return 1;
 }
 
-package MySAX_Breadcrumbs;
+
+package LocalSAX_FloatingThumbs;
+use base qw (XML::SAX::Base);
+
+sub start_element {
+  my $self = shift;
+  my $data = shift;
+
+  $self->SUPER::start_element($data);
+
+  if ($data->{Name} eq "body") {
+    $self->_spacer();
+  }
+}
+
+sub end_element {
+  my $self = shift;
+  my $data = shift;
+
+  if ($data->{Name} eq "body") {
+    $self->_spacer();
+  }
+
+  $self->SUPER::end_element($data);
+}
+
+sub _spacer {
+  my $self = shift;
+  $self->SUPER::start_element({Name=>"div",Attributes=>{
+							"{}class" => {
+								      Name         => "class",
+								      LocalName    => "class",
+								      Prefix       => "",
+								      NamespaceURI => "",
+								      Value        => "spacer",
+								     }
+						       }});
+  $self->SUPER::characters({Data=>" "});
+  $self->SUPER::end_element({Name=>"div"});
+  return 1;
+}
+
+package LocalSAX_Breadcrumbs;
 use base qw (XML::SAX::Base);
 
 use File::Basename;
@@ -2015,7 +2060,7 @@ sub start_element {
   return 1;
 }
 
-package MySAX_Scaled;
+package LocalSAX_Scaled;
 use base qw (XML::SAX::Base);
 
 use Image::Shoehorn;
@@ -2320,7 +2365,7 @@ return 1;
 # because they cause even more weirdness with XML::LibXML and it's
 # seeming inability to deal with XHTML files. I really don't get
 # what's going on so we play a little game and set them event the 
-# xml_decl event in the MySAX_Image filter is called next. Gah!
+# xml_decl event in the LocalSAX_Image filter is called next. Gah!
 
 # NOTE ALSO : that this is also where we happen to set the encoding
 
@@ -2361,15 +2406,15 @@ __DATA__
      <xsl:value-of select = "/html/body/div[@id=$id]/following-sibling::*[1][name()='div']/a/@href" />
     </xsl:variable>
 
-    <xsl:variable name = "last" select = "count(/html/body/div[@class='file' or 'directory'])" />
+    <xsl:variable name = "last" select = "count(/html/body/div[@class='file' or @class = 'directory'])" />
 
     <xsl:variable name = "prev_title">
      <xsl:choose>
       <xsl:when test = "$prev != ''">
-       <xsl:value-of select = "/html/body/div[@id=$id]/preceding-sibling::*[1][@class='file' or 'directory']/a" />
+       <xsl:value-of select = "/html/body/div[@id=$id]/preceding-sibling::*[1][@class='file' or @class = 'directory']/a" />
       </xsl:when>
       <xsl:otherwise>
-       <xsl:value-of select = "/html/body/div[@class='file' or 'directory'][position()=$last]/a" />
+       <xsl:value-of select = "/html/body/div[@class='file' or @class = 'directory'][$last]/a" />
       </xsl:otherwise>
      </xsl:choose>
     </xsl:variable>
@@ -2380,7 +2425,7 @@ __DATA__
          <xsl:value-of select = "$prev" />
         </xsl:when>
         <xsl:otherwise>
-         <xsl:value-of select = "/html/body/div[@class='file' or 'directory'][position()=$last]/a/@href" />
+         <xsl:value-of select = "/html/body/div[@class='file' or @class = 'directory'][$last]/a/@href" />
         </xsl:otherwise>
        </xsl:choose>
       </xsl:variable>
@@ -2399,10 +2444,10 @@ __DATA__
      <xsl:variable name = "next_title">
       <xsl:choose>
        <xsl:when test = "$next != ''">
-        <xsl:value-of select = "/html/body/div[@id=$id]/following-sibling::*[1][@class='file' or 'directory']/a" />
+        <xsl:value-of select = "/html/body/div[@id=$id]/following-sibling::*[1][@class='file' or @class = 'directory']/a" />
        </xsl:when>
        <xsl:otherwise>
-        <xsl:value-of select = "/html/body/div[@class='file' or 'directory'][position()=1]/a" />
+        <xsl:value-of select = "/html/body/div[@class='file' or @class = 'directory'][1]/a" />
        </xsl:otherwise>
       </xsl:choose>
      </xsl:variable>
@@ -2413,7 +2458,7 @@ __DATA__
         <xsl:value-of select = "$next" />
        </xsl:when>
        <xsl:otherwise>
-        <xsl:value-of select = "/html/body/div[position()=1]/a/@href" />
+        <xsl:value-of select = "/html/body/div[@class = 'file' or @class = 'directory'][1]/a/@href" />
        </xsl:otherwise>
       </xsl:choose>
      </xsl:variable>
@@ -2568,10 +2613,12 @@ body {
     <link>
      <xsl:attribute name = "rel">start</xsl:attribute>
      <xsl:attribute name = "title">
-      <xsl:value-of select = "/html/body/div[@class='file' or 'directory'][position()=1]/a" />
+      <xsl:value-of select = "/html/body/div[@class='file' or 'directory'][1]/a" />
+      <!--<xsl:value-of select = "/html/body/div[@class='file' or 'directory'][position()=1]/a" />-->
      </xsl:attribute>
      <xsl:attribute name = "href">
-      <xsl:value-of select = "/html/body/div[@class='file' or 'directory'][position()=1]/a/@href" />
+      <xsl:value-of select = "/html/body/div[@class='file' or 'directory'][1]/a/@href" />
+      <!--<xsl:value-of select = "/html/body/div[@class='file' or 'directory'][position()=1]/a/@href" />-->
      </xsl:attribute>
     </link>
     <link>
@@ -2602,7 +2649,6 @@ body {
      ====================================================================== -->
 
  <xsl:template name = "Body">
-
   <div>
    <xsl:attribute name = "class">menu</xsl:attribute>
    <xsl:call-template name = "Menu" />
@@ -2690,7 +2736,7 @@ body {
        <xsl:copy-of select = "/html/body/div[@id=$id]/preceding-sibling::*[1]/div[@class='thumbnail']/*" />
       </xsl:when>
       <xsl:otherwise>
-       <xsl:copy-of select = "/html/body/div[@class='file' or 'directory'][position()=$last]/div[@class='thumbnail']/*" />
+       <xsl:copy-of select = "/html/body/div[@class='file' or @class = 'directory'][$last]/div[@class='thumbnail']/*" />
       </xsl:otherwise>
      </xsl:choose>
 
@@ -2737,7 +2783,7 @@ body {
        <xsl:copy-of select = "/html/body/div[@id=$id]/following-sibling::*[1]/div[@class='thumbnail']/*" />
       </xsl:when>
       <xsl:otherwise>
-       <xsl:copy-of select = "/html/body/div[@class='file' or 'directory'][position()=1]/div[@class='thumbnail']/*" />
+       <xsl:copy-of select = "/html/body/div[@class='file' or @class = 'directory'][1]/div[@class='thumbnail']/*" />
       </xsl:otherwise>
      </xsl:choose>
 
@@ -2844,7 +2890,7 @@ body {
  </xsl:template>
 
 <!-- ======================================================================
-     $Date: 2002/07/31 22:50:32 $
+     $Date: 2002/08/05 14:54:50 $
      ====================================================================== -->
 
 </xsl:stylesheet>
