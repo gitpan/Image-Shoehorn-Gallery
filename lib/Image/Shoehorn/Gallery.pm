@@ -1,0 +1,2281 @@
+=head1 NAME
+
+Image::Shoehorn::Gallery - generate "smart" HTML slideshows from a directory of image files.
+
+=head1 SYNOPSIS
+
+ use Image::Shoehorn::Gallery;
+
+ Image::Shoehorn::Gallery->create({
+   	 	                   directory   => "/htdocs/images",
+		                   url         => "http://mysite.com/images",
+		                   static      => 1,
+		                   scales      => [
+				                   [ "thumb","75x50" ],
+				                   [ "small","25%"   ],
+				                   [ "medium","50%"  ],
+				                ],
+                                   iptc        => ["headline","caption/abstract"],
+                                   maxdepth    => 0,
+                                   set_styles  => {
+                                                  image => [
+                                                            {title=>"my css",href=>"/styles.css"},
+                                                           ],
+                                                 },
+                                   set_index_images => { default => 1 },
+    		                  });
+
+=head1 DESCRIPTION
+
+Image::Shoehorn::Gallery generates HTML slideshows from a directory of image files. But wait, there's more!
+
+Image::Shoehorn uses I<XML::Filter::XML_Directory_2XHTML>, I<XML::SAX::Machines> and a small army of I<Image::*> packages allowing you to :
+
+=over 4
+
+=item *
+
+Create one, or more, scaled versions of an image, and their associate HTML pages. Scaled version may also be defined but left to be created at a later date by I<Apache::Image::Shoehorn>.
+
+Associate HTML are always "baked", rather than "fried" (see also : http://www.aaronsw.com/weblog/000404 )
+
+=item *
+
+Read a user-defined list of IPTC and EXIF metadata fields from each image and include the data in the HTML pages.
+
+=item *
+
+Generate named indices and next/previous links by reading IPTC "headline" data.
+
+=item *
+
+Define one, or more, SAX filters to be applied to "index" and individual "image" documents before they are passed the final I<XML::SAX::Writer> filter for output.
+
+The default look and feel of the gallery pages is pretty plain, but you could easily define a "foofy design" XSL stylesheet to be applied with the I<XML::Filter::XSLT> SAX filter:
+
+ <xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+                 version = "1.0" >
+
+  <xsl:template match = "/">
+  <html>
+   <xsl:copy-of select = "html/head" />
+   <body>
+
+    <!-- lots of foofy design stuff -->
+    <xsl:copy-of select = "/html/body/*" />
+    <!-- lots of foofy design stuff -->
+
+   </body>
+  </html>
+  </xsl:template>
+
+ </xsl:stylesheet>
+
+=item *
+
+Generates valid XHTML (strict) and CSS!
+
+=back
+
+=cut
+
+use strict;
+package Image::Shoehorn::Gallery;
+
+$Image::Shoehorn::Gallery::VERSION = '0.1';
+
+use Carp;
+use Digest::MD5 qw (md5_hex);
+
+use DirHandle;
+
+use File::Basename;
+use File::Copy;
+
+use Image::Shoehorn;
+use Image::Size qw (imgsize);
+
+use IO::File;
+use XML::SAX::Writer;
+use XML::Filter::XML_Directory_2XHTML;
+use XML::Directory::SAX;
+
+use XML::SAX::Machines qw (Pipeline);
+$XML::SAX::ParserPackage = "XML::SAX::Expat";
+
+#
+
+my $directory = undef;
+my $url       = undef;
+my $static    = undef;
+my $scales    = {};
+my $views     = [];
+my $iptc      = [];
+my $exif      = [];
+my $conf      = undef;
+my $maxdepth  = undef;
+my $encoding  = undef;
+
+my $styles    = {};
+my $filters   = {};
+my $images    = {};
+
+my $verbose   = 0;
+my $force     = 0;
+
+#
+
+my $cur_directory = undef;
+my $visit         = 0;
+
+=head1 PACKAGE METHODS
+
+=head2 __PACKAGE__->create(\%args)
+
+This is the magic spell that will create your galleries.
+
+Valid arguments are :
+
+=over 4
+
+=item *
+
+B<directory>
+
+String. 
+
+The path on your file system where your images are kept.
+
+I<Required>
+
+=item *
+
+B<url>
+
+String. 
+
+The URL that maps to I<directory> on your webserver.
+
+I<Required>
+
+=item *
+
+B<maxdepth>
+
+Int.
+
+The maximum number of sub directories to munge and render.
+
+=item *
+
+B<static>
+
+Boolean.
+
+Used in conjunction with the I<scales> option for generating scaled versions of an image and their URLs.
+
+If false, or not defined, the package will assume that you have configured I<Apache::Image::Shoehorn> to generate scaled versions of an image.
+
+If true, then the package will output image URLs that map to static images on the filesystem and ask I<Image::Shoehorn> to create the new files, or update existing ones.
+
+Note, however, that the "thumb" (thumbnail) image will be generated regardless of whether or not you are using I<Apache::Image::Shoehorn>. This is actually a feature since you would peg your machine having to create all those thumbnails the first time you loaded an especially large index page.
+
+=item *
+
+B<scales>
+
+Array reference containing one, or more, array referece.
+
+Each of the child arrays should contain (2) elements :
+
+=over 4
+
+=item *
+
+I<name>
+
+A name like "small" or "medium". This name is used as part of the naming scheme for images that have been scaled and their associate HTML pages.
+
+Names can be pretty much anything you'd like, although the name "thumb" is expected to be used for thumbnails.
+
+=item *
+
+I<scale>
+
+These are required whether or not you are going to be generate static images. Even if you are going to render your images on the fly using I<Apache::Image::Shoehorn>, the HTML spec (hi Karl) mandates that you provide height and widgth attributes for your img elements. So...
+
+Takes arguments in the same form as I<Image::Shoehorn> which are, briefly :
+
+=over 4
+
+=item *
+
+B<n>%
+
+=item *
+
+B<n>xB<n>
+
+=item *
+
+xB<n>
+
+=item *
+
+B<n>x
+
+=back
+
+You must atleast define a "thumb" scale.
+
+=back
+
+=item *
+
+B<iptc>
+
+Array reference.
+
+A list of IPTC fields to read from an image. Fields are presented in the order they are defined.
+
+For a complete list of IPTC fields, please consult the L<Image::IPTCInfo>.
+
+=item *
+
+B<exif>
+
+Array reference.
+
+A list of EXIF fields to read from an image. Fields are presented in the order they are defined.
+
+For a complete list of EXIF fields, please consult http://www.ba.wakwak.com/~tsuruzoh/Computer/Digicams/exif-e.html
+
+=item *
+
+B<set_styles>
+
+Hash reference. 
+
+Used to override the default CSS for either and "index" page or an individual "image" page.
+
+Valid hash keys are :
+
+=over 4
+
+=item *
+
+B<index>
+
+=item *
+
+B<image>
+
+=back
+
+Where each key expects an array ref of hash refs whose keys are :
+
+=over 4
+
+=item *
+
+I<href>
+
+=item *
+
+I<title>
+
+Default is ""
+
+=item *
+
+I<rel>
+
+Default is "stylesheet"
+
+=item *
+
+I<media> 
+
+Default is "all".
+
+=back
+
+Styles will be added in the order that they are defined in the array ref.
+
+The default CSS styles are outlined below.
+
+=item *
+
+B<set_filters>
+
+Hash reference
+
+Define one or more additional filters to be applied to either an "index" or individual "image" page.
+
+Valid hash keys are :
+
+=over 4
+
+=item *
+
+B<index>
+
+=item *
+
+B<image>
+
+=back
+
+Filters are applied last, before events are finally handed off to I<XML::SAX::Writer> and in the order that they are defined.
+
+Example: 
+
+ package MySAX;
+ use base qw (XML::SAX::Base);
+
+ sub start_element {
+    my $self = shift;
+    my $data = shift;
+
+    $self->SUPER::start_element($data);
+
+    if ($data->{Name} eq "body") {
+       $self->SUPER::start_element({Name=>"h1"});
+       $self->SUPER::characters({Data=>"hello world"});
+       $self->SUPER::end_element({Name=>"h1"});
+    }
+ }
+
+ package main;
+
+ # The following will add <h1>hello world</h1>
+ # at the top of all your 'image' pages. Woot!
+
+ use Image::Shoehorn::Gallery;
+ Image::Shoehorn::Gallery->create({
+                                   # ...
+
+                                   set_filters => { image => [ MySAX->new() ]},
+                                  });
+
+=item *
+
+B<set_index_images>
+
+Hash reference.
+
+Define images to associate with files in a directory listing. Valid keys are :
+
+=over 4
+
+=item *
+
+I<image>
+
+Image to associate with a file whose media type is "image"
+
+Default is to generate and include a thumbnail, as defined by the "thumb" scale option (see above.)
+
+=item *
+
+I<directory>
+
+Image to associate with a directory.
+
+=item *
+
+I<file>
+
+Image to associate with a file whose media type is not "image"
+
+Example :
+
+ # Use the default Apache icons
+
+ my %images = (
+	       directory => {
+			     src    => "/icons/dir.gif",
+			     height => "20",
+			     width  => "20",
+			     alt    => "ceci n'est pas un dossier",
+			    },
+	       file => {
+			src    => "/icons/unknown.gif",
+			height => "20",
+			width  => "20",
+			alt    => "ceci n'est pas un fichier",
+		       },
+	       );
+
+ Image::Shoehorn::Gallery->create({
+				   # ...
+				   set_index_images => \%images,
+				  });
+
+=item *
+
+I<default>
+
+Boolean.
+
+This is just a shortcut to use the default I<image> handler and the handlers for I<files> and I<directories> example described above. 
+
+If you are not using Apache for your web server and/or have not aliased the Apache icons folder to /icons, it won't do you much good.
+
+=back
+
+Valid keys arguments are either :
+
+=over 4
+
+=item *
+
+B<hash reference>
+
+Containing key/value pairs for the following image attributes :
+
+=over 4
+
+=item *
+
+I<src>
+
+=item *
+
+I<height>
+
+=item *
+
+I<width>
+
+=item *
+
+I<alt>
+
+=back
+
+=item *
+
+B<code reference>
+
+The code reference will be passed the absolute path of the current image and is expected to return a hash reference similar to the one described above.
+
+=back
+
+This is an I<XML::Filter::XML_Directory_2XHTML>-ism. Please consult docs for further details.
+
+=item *
+
+B<set_encoding>
+
+String.
+
+Default is "UTF-8"
+
+=item *
+
+B<force>
+
+Int.
+
+By default neither the scaled version of an image, nor the associate HTML files, will be created unless the source image has a more recent modification date. 
+
+You can use this option to override this check.
+
+If the value is greater than zero, HTML files will be regenerated.
+
+If the value is greater than one, images and HTML files will be regenerated.
+
+=item *
+
+B<verbose>
+
+Boolean.
+
+=back
+
+=cut
+
+sub create {
+  my $pkg = shift;
+  my $args = shift;
+
+  #
+
+  %IPTC::iptc  = ();
+  %IPTC::views = ();
+
+  %EXIF::exif  = ();
+  %EXIF::views = ();
+
+  $directory = undef;
+  $url       = undef;
+  $static    = undef;
+  $scales    = {};
+  $views     = [];
+  $iptc      = [];
+  $exif      = [];
+  $conf      = undef;
+  $maxdepth  = undef;
+
+  $styles    = {index=>[],image=>[]};
+  $filters   = {index=>[],image=>[]};
+  $images    = {};
+
+  $encoding  = undef;
+
+  $verbose   = 0;
+  $force     = 0;
+
+  #
+
+  if ($args->{conf}) {
+    return &read_conf($conf);
+  }
+
+  #
+
+  if (! -d $args->{directory}) {
+    carp "$args->{directory} is not a directory.\n";
+    return 0;
+  }
+
+  #
+
+  if (ref($args->{scales}) ne "ARRAY") {
+    carp "Scales must be passes as an array reference of array references.\n";
+    return 0;
+  }
+
+  #
+
+  foreach ("iptc","exif") {
+    if ((exists($args->{$_})) && (ref($args->{$_}) ne "ARRAY")) {
+      carp "$_ must be passed as an array reference.\n";
+      return 0;
+    }
+  }
+
+  #
+
+  foreach (@{$args->{scales}}) {
+    if (ref($_) ne "ARRAY") {
+      carp;
+      next;
+    }
+
+    unless ($_->[0] eq "thumb") {
+      push @{$views},$_->[0];
+    }
+
+    if ($_->[1]) { 
+      $scales->{$_->[0]} = $_->[1]; 
+    }
+  }
+
+  #
+
+  if ($args->{set_index_images}) {
+    if (ref($args->{set_index_images}) eq "HASH") {
+
+      if (exists($args->{set_index_images}->{default})) {
+	$images->{default} = 1;
+      }
+
+      else {
+	foreach ("image","file","directory") {
+	  next unless (exists $args->{set_index_images}->{$_});
+
+	  if (ref($args->{set_index_images}->{$_}) =~ /^(HASH|CODE)$/) {
+	    $images->{$_} = $args->{set_index_images}->{$_};
+	  }
+
+	  else { carp "The $_ field must be passed as a hash ref or a code ref."; }
+	}
+      }
+    }
+
+    else { carp "Passed as hash"; }
+  }
+
+  #
+
+  if ($args->{set_styles}) {
+    if (ref($args->{set_styles}) eq "HASH") {
+
+      foreach my $type ("image","index") {
+	next if (! exists($args->{set_styles}->{$type}));
+
+	if (ref($args->{set_styles}->{$type}) ne "ARRAY") {
+	  carp "Styles for $type must be passed as an array ref.\n";
+	  next;
+	}
+
+	$styles->{$type} = $args->{set_styles}->{$type};
+      }
+    }
+
+    else { carp "Pass as hash ref"; }
+  }
+
+  #
+
+  if ($args->{set_filters}) {
+    if (ref($args->{set_filters}) eq "HASH") {
+
+      foreach my $type ("image","index") {
+	next if (! exists($args->{set_filters}->{$type}));
+
+	if (ref($args->{set_filters}->{$type}) ne "ARRAY") {
+	  carp "Filters for $type must be passed as an array ref.\n";
+	  next;
+	}
+
+	$filters->{$type} = $args->{set_filters}->{$type};
+      }
+    }
+
+    else { carp "Pass as hash ref"; }
+  }
+
+  #
+
+  if (! $scales->{'thumb'}) {
+    carp;
+    return 0;
+  }
+
+  #
+
+  if (defined($args->{'maxdepth'})) {
+    $maxdepth = $args->{'maxdepth'};
+  }
+
+  #
+
+  $directory = $args->{'directory'};
+  $url       = $args->{'url'};
+  $static    = $args->{'static'};
+
+  $iptc      = $args->{'iptc'} if ($args->{'iptc'});
+  $exif      = $args->{'exif'} if ($args->{'exif'});
+
+  $encoding  = $args->{'set_encoding'} if ($args->{'set_encoding'});
+
+  $verbose   = $args->{verbose};
+  $force     = $args->{force};
+
+  #
+
+  &make_index($directory);
+  &visit($directory);
+
+  #
+
+  return 1;
+}
+
+sub format_link {
+  my $pkg  = shift;
+
+  (my $link = $_[0]) =~ s/$directory/$url/;
+  return $link;
+}
+
+sub unformat_link {
+  my $pkg = shift;
+
+  (my $path = $_[0]) =~ s/$url/$directory/;
+  return $path;
+}
+
+sub page_for_image {
+    my $pkg = shift;
+
+    my $suffix = ($_[0]->[1]) ? "-".$_[0]->[1].".html" : ".html";
+    (my $output = $_[0]->[0]) =~ s/(.*)\.([^\.]+)$/$1$suffix/;
+    return $output;
+}
+
+sub read_conf {
+  carp "I don't know how to read conf files yet.\n";
+  return 0;
+}
+
+sub visit {
+  my $path = shift;
+
+  print STDERR "Visiting $path\n"
+    if ($verbose);
+
+  $visit ++;
+
+  if ((defined($maxdepth)) && ($visit > $maxdepth)) {
+    return;
+  }
+
+  my $dh = DirHandle->new($path);
+
+   foreach ($dh->read()) {
+    next if $_ =~ /^\./;
+    my $loc = "$path/$_";
+
+    if (-d $loc) {
+      &make_index($loc);
+      &visit($loc);
+    }
+  }
+
+  $visit --;
+}
+
+sub make_index {
+  my $path = shift;
+
+  print STDERR "[make-index] Making $path\n"
+    if ($verbose);
+
+  $cur_directory = $path;
+
+  my $html = "$path/index.html";
+  my $tmp  = $html.".tmp";
+
+  my $output  = IO::File->new(">$tmp");
+  my $writer  = XML::SAX::Writer->new(Output=>$output);
+
+  my $filters = __PACKAGE__->filters("index");
+
+  my $machine = Pipeline(
+			 ((scalar(@{$filters})) ? @{$filters} : ()),
+			 $writer);
+
+  #
+
+  # This is broken, I know.
+  # There appears to be some degree of funkiness going
+  # on with the inheritance chain for 2XHTML that is 
+  # preventing the SAX::Machine from getting the output
+  # of 2XHTML and passing it on to $writer. I think, anyway.
+
+  my $xhtml = XML::Filter::XML_Directory_2XHTML->new(Handler=>$machine);
+
+  $xhtml->debug();
+
+  if ($encoding) {
+    $xhtml->set_encoding($encoding);
+  }
+
+  $xhtml->exclude_root(1);
+  $xhtml->exclude(
+		  starting => ["\\."],
+		  ending   => ["html","tmp","~"],
+		  matching => ["^(.*)-(".join("|","thumb",@{$views}).")\.([^\.]+)\$"],
+		 );
+
+  #
+
+  my $css = __PACKAGE__->styles("index");
+
+  if (scalar(@$css)) {
+    $xhtml->set_styles($css);
+  }
+
+  else {
+    $xhtml->set_style(\qq(
+.directory { margin-bottom:5px;clear:left;}
+.file      { margin-bottom:5px;clear:left;}
+.thumbnail { display:block;width:100px;float:left;}
+.file ul   { float:left;}
+));
+  }
+
+  #
+
+  if ($images->{default}) {
+    $xhtml->set_images({
+			image     => \&define_thumbnail,
+			directory => {
+				      src    => "/icons/dir.gif",
+				      height => "20",
+				      width  => "20",
+				      alt    => "directory",
+				     },
+			file => {
+				 src    => "/icons/unknown.gif",
+				 height => "20",
+				 width  => "20",
+				 alt    => "unknown file",
+				}
+		       });
+  }
+
+  else {
+    my $args = { image => ($images->{'image'} || \&define_thumbnail) };
+
+    foreach ("file","directory") {
+      if ($images->{$_}) { $args->{$_} = $images->{$_} };
+    }
+
+    $xhtml->set_images($args);
+  }
+
+  #
+
+  $xhtml->set_callbacks({
+			 linktext  => \&format_linktext,
+			 link      => sub { 
+			   return (-d $_[0]) ? 
+			     __PACKAGE__->format_link($_[0]) : 
+			       __PACKAGE__->page_for_image([__PACKAGE__->format_link($_[0])]); 
+			 },
+			});
+
+  $xhtml->set_handlers({file=>MySAX_Scaled->new(Handler=>$writer)});
+
+  #
+
+  my $directory = XML::Directory::SAX->new(Handler=>$xhtml);
+
+  $directory->set_maxdepth(0);
+  $directory->set_details(2);
+  $directory->order_by("a");
+
+  $directory->parse_dir($path);
+
+  #
+
+  $output->close();
+  move $tmp,$html;
+
+  #
+
+  &make_slides($html);
+  return;
+}
+
+sub make_slides {
+  my $index = shift;
+
+  if (! scalar(@{&MySAX_Scaled::files()})) {
+    return 1;
+  }
+
+  foreach my $img (@{&MySAX_Scaled::files()}) {
+
+    # This is a bug, not a feature
+    next if ($img =~ /^(.*)\.html$/);
+
+    print STDERR "[make-slide] image is '$img'\n"
+      if ($verbose);
+
+    my $sid = "ID".&md5_hex("/".&basename($img));
+
+    foreach my $scale ("",@{$views}) {
+
+      my $html   = __PACKAGE__->page_for_image([$img,$scale]);
+
+      #
+
+      if (! $force) {
+	(my $source = $img) =~ s/^(.*)-($scale)\.([^\.]+)$/$1\.$3/;
+
+	unless ((stat($source))[9] > (stat($html))[9]) {
+	  next;
+	}
+      }
+
+      #
+
+      my $output = IO::File->new(">$html");
+      my $writer = XML::SAX::Writer->new(Output=>$output);
+
+      my $xsl = MyXSLT->new();
+      $xsl->set_stylesheet_string(STYLESHEET->data());
+
+      # This is really what I'd like to do but
+      # I can't get it to work :-(
+      # open(STYLESHEET,"<&=STYLESHEET::DATA");
+      # $xsl->set_stylesheet_fh(\*STYLESHEET);
+
+      $xsl->set_stylesheet_parameters(
+				      id     => $sid,
+				      scale  => $scale,
+				      scales => join(",",@{&views()}),
+				      static => ($static) ? (scalar(keys %$scales) > 1) ? 2 : $static : 0,
+				     );
+
+      my $filters = __PACKAGE__->filters("image");
+
+      my $machine = Pipeline(
+			     $xsl,
+			     "MySAX_Image",
+			     ((scalar(@{$filters})) ? @{$filters} : ()),
+			     $writer,
+			    );
+
+      print STDERR "[make-slide] Making $html..."
+	if ($verbose);
+
+      $machine->parse_uri($index);
+
+      print STDERR "OK\n"
+	if ($verbose);
+    }
+  }
+
+  return 1;
+}
+
+sub define_thumbnail {
+  my $path = shift;
+
+  my ($x,$y);
+
+  ($x,$y) = imgsize($path);
+  ($x,$y) = Image::Shoehorn->scaled_dimensions([$x,$y,undef,50]);
+
+  my $title = $path;
+
+  if (my $iptc = IPTC->get($path)) {
+    $title = $iptc->Attribute("headline");
+  }
+
+  my $src = __PACKAGE__->format_link($path);
+
+  if ($static) {
+    $src =~ s/^(.*)\.([^\.]+)$/$1-thumb\.$2/;
+  } else {
+    $src .= "?scale=thumb";
+  }
+
+  return {
+	  src    => $src,
+	  height => $y,
+	  width  => $x,
+	  alt    => $title,
+	 };
+}
+
+sub format_linktext {
+
+  if (-d $_[0]) {
+    return $_[1];
+  }
+
+  if (XML::Filter::XML_Directory_Pruner->mtype($_[0]) ne "image") {
+    return $_[1];
+  }
+
+  if (my $iptc = IPTC->get($_[0])) {
+    return $iptc->Attribute("headline");
+  }
+
+  return $_[1];
+}
+
+sub directory {
+  return $directory;
+}
+
+sub scales {
+  return $scales;
+}
+
+sub cur_directory {
+  return $cur_directory;
+}
+
+sub views {
+  return $views;
+}
+
+sub iptc {
+    return $iptc;
+}
+
+sub exif {
+    return $exif;
+}
+
+sub styles {
+  return $styles->{$_[1]};
+}
+
+sub filters {
+  return $filters->{$_[1]};
+}
+
+sub encoding {
+  return $encoding;
+}
+
+sub force {
+  return $force;
+}
+
+sub verbose {
+  return $verbose;
+}
+
+=head1 NAMING CONVENTIONS
+
+Let's say you've got an image named :
+
+ 20020603-my-new-toy.jpg
+
+You've defined two "views" to be generated : small and medium. The following files will be created :
+
+ 20020603-my-new-toy.html
+ 20020603-my-new-toy-thumb.jpg **
+ 20020603-my-new-toy-small.jpg *
+ 20020603-my-new-toy-small.html
+ 20020603-my-new-toy-medium.jpg *
+ 20020603-my-new-toy-medium.html
+
+ *  If you are rendering scaled images on the fly, with I<Apache::Image::Shoehorn>, 
+    these files not be created until such a time as they are actually viewed
+
+ ** Thumbnails are always generated, regardless of the I<static> flag. As mentioned 
+    earlier, this is a feature. If you have a directory with many images, you will peg
+    your web server the first time you have to render all those images for the index
+    listing.
+
+The package uses I<XML::Filter::XML_Directory_2XHTML> which, a few steps up the inheritance tree, uses I<XML::Filter::XML_Directory_Pruner> to exclude certain specific files from the directory (index) listing. The exact rule set currently used it :
+
+  $xhtml->exclude(
+		  starting => ["\\."],
+		  ending   => ["html","tmp","~"],
+		  # e.g. ending with "-thumb.jpg","-small.jpg" or "-medium.jpg"
+		  matching => ["^(.*)-(".join("|","thumb",@{$views}).")\.([^\.]+)\$"],
+		 );
+
+The plan is to, eventually, teach I<XML::Filter::XML_Directory_Pruner> to include and exclude widgets based on media type, at which point we could simply do :
+
+ $xhtml->include( media => "image" );
+
+But until then, it is recommended that you make sure your source images don't match the "matching" pattern describe above. Or if you just think I'm an idiot and have a better rule-set, send my a note and I'll probably include it.
+
+=head1 CSS
+
+The following CSS classes are defined for the HTML generated by the package. 
+
+They are provided as a reference in case you want to specify your own CSS stylesheet.
+
+=head2 "index" page
+
+ .directory {
+             margin-bottom:5px;
+             clear:left;
+           }
+
+ .file      {
+             margin-bottom:5px;
+             clear:left;
+           }
+
+ .thumbnail {
+             display:block;
+             width:100px;float:left;
+           }
+
+ .file ul   { 
+             float:left;
+           }
+
+=head2 "image" page
+
+ .menu {
+        margin-bottom:5px;
+        padding:5px;
+ }
+
+ .menu-link-previous {
+		padding-right : 10px;
+ }
+
+ .menu-link-previous img {
+		margin-right:15px;
+ }
+
+ .menu-link-index {
+		   font-weight:600;
+                  }
+
+ .menu-link-next {
+		  padding-left : 10px;
+                 }
+
+ .menu-link-next img {
+		     margin-left:15px;
+ }
+
+ .content {
+          padding-top:20px;
+         }
+
+ .image { 
+        position:absolute;
+        top:auto;
+        right:auto;
+        left:170px;
+        bottom:auto;
+ }
+
+ .meta { 
+        min-width:150px;
+        max-width:150px;
+ }  
+
+ .links {
+        border: solid thin;
+        margin-bottom: 5px;
+ }
+
+ .links span {
+        display:block;
+	padding:3px;
+ }
+
+ .iptc { 
+        background-color : #fffff0;
+        border-top: solid thin; 
+        border-left: solid thin;
+        border-right: solid thin;
+        margin-bottom : 5px;
+      }
+
+ .iptc span { 
+        display:block; 
+        padding:3px;
+        border-bottom:solid thin;
+ }
+
+ .iptc-field { 
+        background-color : #f5f5dc;
+        color:#a52a2a;
+        border-bottom:solid thin #000;
+        }
+
+ .exif { 
+        background-color : #f5f5dc;
+        border-top: solid thin; 
+        border-left: solid thin; 
+        border-right: solid thin; 
+        margin-bottom : 5px; 
+        }
+
+ .exif span { 
+        display:block; 
+        padding:3px;
+        border-bottom:solid thin;
+ } 
+
+ .exif-field { 
+        color:#a52a2a;
+        background-color:#cccc99;
+        border-bottom:solid thin #000;
+        }
+
+=head1 VERSION
+
+0.1
+
+=head1 AUTHOR
+
+Aaron Straup Cope 
+
+=head1 DATE
+
+July 25, 2002
+
+=head1 TO DO
+
+=over 4
+
+=item *
+
+Add links to "parent" directory, where appropriate; need to determine whether or not this is a XML::Filter::XML_Directory_2XHTML thing.
+
+=item *
+
+Figure out why I keep getting errors when I try passing STYLESHEET::DATA (or copies of it) to the XSLT munger.
+
+=item *
+
+Set/get config options using closures.
+
+=item *
+
+Add hooks to read a conf file - this allow involves hacking I<Apache::Image::Shoehorn> so that it can also read the same conf file
+
+=item *
+
+Add hooks for generating slides from a "virtual" directory; specifically a list of disparate files.
+
+=item *
+
+Add hooks for supporting I<XML::Filter::Sort>
+
+=item *
+
+Consider I<interactive> option that would prompt user for IPTC data as files are being processed.
+
+=back
+
+=head1 SEE ALSO
+
+http://www.la-grange.net/2002/07/22.html
+
+http://aaronland.info/weblog/archive/4474
+
+http://perl.aaronland.info/image/shoehorn/gallery/www/example/index.html
+
+=head1 REQUIREMENTS
+
+I<XML::Filter::XML_Directory_2XHTML>
+
+I<XML::Filter::XSLT>
+
+I<XML::SAX::Machines>
+
+I<XML::SAX::Writer>
+
+I<Image::Shoehorn>
+
+I<Image::IPTCInfo>
+
+I<Image::Info>
+
+I<Digest::MD5>
+
+=head1 LICENSE
+
+Copyright (c) 2002, Aaron Straup Cope. All Rights Reserved.
+
+This is free software, you may use it and distribute it under the same terms as Perl itself.
+
+=cut
+
+package MyXSLT;
+use base qw (XML::Filter::XSLT::LibXSLT);
+
+sub set_stylesheet_parameters {
+    my $self   = shift;
+    my %params = @_;
+
+    if (keys %params) {
+	map { push @{$self->{'__params'}},&XML::LibXSLT::xpath_to_string($_=>$params{$_}) } keys %params;
+    }
+}
+
+sub set_stylesheet_string {
+  my $self = shift;
+  $self->{Source}{String} = $_[0];
+}
+
+# No point until I figure out how
+# to pass the filehandles :-(
+
+#sub set_stylesheet_fh {
+#  my $self = shift;
+#  $self->{Source}{ByteStream} = $_[0];
+#}
+
+sub end_document {
+    my $self = shift;
+
+    my $dom = $self->XML::LibXML::SAX::Builder::end_document(@_);
+
+    # This is so fucking stupid, but there are bugs
+    # somewhere in all the magic that handles XHTML
+    # and XSLT so...
+
+    my $parser = XML::LibXML->new;
+    $dom = $parser->parse_html_string($dom->toString());
+
+    my $xslt       = XML::LibXSLT->new;
+    my $stylesheet = $xslt->parse_stylesheet($self->{StylesheetDOM});
+
+    my $results = $stylesheet->transform($dom,((ref($self->{'__params'}) eq "ARRAY") ? @{$self->{'__params'}} : ()));
+
+    my $parser = XML::LibXML::SAX::Parser->new(%$self);
+    $parser->generate($results);
+}
+
+package MySAX_Image;
+use base qw (XML::SAX::Base);
+
+use File::Basename;
+use Image::Size qw (imgsize);
+use Image::Info;
+
+my $possible_views;
+
+use constant DTD_HTML_ROOT     => "html";
+use constant DTD_HTML_PUBLICID => "-//W3C//DTD XHTML 1.0 Strict//EN";
+use constant DTD_HTML_SYSTEMID => "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd";
+
+sub xml_decl {
+  my $self = shift;
+  $self->SUPER::xml_decl({
+			  Version  => "1.0",
+			  Encoding => (Image::Shoehorn::Gallery->encoding() || "UTF-8")
+			 });
+
+  # If you're wondering what is going on here,
+  # see the note in the STYLESHEET package.
+
+  $self->SUPER::start_dtd({Name=>DTD_HTML_ROOT,
+			   PublicId=>DTD_HTML_PUBLICID,
+			   SystemId=>DTD_HTML_SYSTEMID});
+  $self->SUPER::end_dtd();
+}
+
+sub start_document {
+  my $self = shift;
+
+  $self->{'__styles'} = scalar(@{Image::Shoehorn::Gallery->styles("image")});
+  $possible_views = join("|",@{Image::Shoehorn::Gallery->views()});
+
+  $self->SUPER::start_document(@_);
+}
+
+sub start_element {
+    my $self = shift;
+    my $data = shift;
+
+    $self->{'__last'} = $data->{Name};
+
+    #
+
+    if (($data->{Name} eq "style") && ($self->{'__styles'})){
+
+      foreach my $style (@{Image::Shoehorn::Gallery->styles("image")}) {
+	$self->SUPER::start_element({Name=>"link",Attributes=>{
+							       "{}href"  => {Name=>"href",
+									     Value=>$style->{'href'},
+									     Prefix=>"",
+									     LocalName=>"href",
+									     NameSpaceURI=>""},
+							       "{}type"  => {Name=>"type",
+									     Value=>"text/css",
+									     LocalName=>"type",
+									     NameSpaceURI=>""},
+							       "{}rel"   => {Name=>"rel",
+									     Value=>($style->{'rel'} || "stylesheet"),
+									     Prefix=>"",
+									     LocalName=>"rel",
+									     NameSpaceURI=>""},
+							       "{}media" => {Name=>"media",
+									     Value=>($style->{'media'} || "all"),
+									     Prefix=>"",
+									     LocalName=>"media",
+									     NameSpaceURI=>""},
+							       "{}title" => {Name=>"title",
+									     Value=>($style->{'title'} || ""),
+									     Prefix=>"",
+									     LocalName=>"title",
+									     NameSpaceURI=>""},
+							      }});
+	$self->SUPER::end_element({Name=>"link"});
+      }
+
+      return 1;
+    }
+
+    #
+
+    if (($data->{Name} eq "img") && 
+	($data->{Attributes}->{'{}id'}->{'Value'} eq "main")) {
+
+      my $src = Image::Shoehorn::Gallery->unformat_link($data->{Attributes}->{'{}src'}->{'Value'});
+      my ($x,$y);
+
+      #
+
+      if ($src =~ /^(.*)\?scale=(.*)$/) {
+
+	# This matters because we also need
+	# to look up IPTC and EXIF data with
+	# $src.
+
+	$src = $1;
+
+	# Call to imgsize needs to be memoized
+	($x,$y) = Image::Shoehorn->dimensions_for_scale((imgsize($src))[0,1],Image::Shoehorn::Gallery->scales()->{$2});
+      }
+
+      else {
+	($x,$y) = imgsize($src);
+      }
+
+      #
+
+      my $alt = &basename($data->{Attributes}->{'{}src'}->{'Value'});
+      if (my $iptc = IPTC->get($src)) {	$alt = $iptc->Attribute("caption/abstract") || $iptc->Attribute("headline") || $alt; }
+
+      $data->{'Attributes'}->{'{}height'} = {
+					     Name         => "height",
+					     LocalName    => "height",
+					     Prefix       => "",
+					     NamespaceURI => "",
+					     Value        => $y,
+					    };
+      $data->{'Attributes'}->{'{}width'} = {
+					     Name         => "width",
+					     LocalName    => "width",
+					     Prefix       => "",
+					     NamespaceURI => "",
+					     Value        => $x,
+					    };
+      $data->{'Attributes'}->{'{}alt'} = {
+					     Name         => "alt",
+					     LocalName    => "alt",
+					     Prefix       => "",
+					     NamespaceURI => "",
+					     Value        => $alt,
+					    };
+
+      $self->SUPER::start_element($data);
+
+      $self->{'__src'} = $src;
+      return 1;
+    }
+
+    if (($data->{Name} eq "div") && 
+	($data->{Attributes}->{'{}class'}->{'Value'} eq "links")) {
+      $self->{'__meta'} = 1;
+    }
+
+    $self->SUPER::start_element($data);
+    return 1;
+}
+
+sub end_element {
+  my $self = shift;
+  my $data = shift;
+  
+  if (($data->{Name} eq "style") && ($self->{'__styles'})){
+    return;
+  }
+
+  $self->SUPER::end_element($data);
+
+  if (($data->{Name} eq "div") && (exists($self->{'__meta'}))) {
+    $self->add_metadata();
+    delete $self->{'__meta'};
+  }
+
+  return 1;
+}
+
+sub characters {
+  my $self = shift;
+  my $data = shift;
+
+  if (($self->{'__last'} eq "style") && ($self->{'__styles'})){
+    return;
+  }
+
+  $self->SUPER::characters($data);
+}
+
+sub add_metadata {
+  my $self = shift;
+
+  my $iptc_props = Image::Shoehorn::Gallery->iptc();
+  my $exif_props = Image::Shoehorn::Gallery->exif();
+  
+  $self->{'__src'} =~ s/^(.*)-($possible_views)\.([^\.]+)$/$1\.$3/;
+  
+  if (scalar(@$iptc_props) > 0) {
+    my $iptc = IPTC->get($self->{'__src'});
+
+    if (($iptc) && (IPTC->test($self->{'__src'}))) {
+      $self->SUPER::start_element({Name=>"div",Attributes => {
+							      "{}class" => {
+									    "Name"         => "class",
+									    "LocalName"    => "class",
+									    "Prefix"       => "",
+									    "NamespaceURI" => "",
+									    "Value"        => "iptc",
+									   },
+							     }});
+      
+      foreach my $prop (@{$iptc_props}) {
+	$self->SUPER::start_element({Name=>"span",Attributes =>{
+								"{}class" => {
+									      "Name"         => "class",
+									      "LocalName"    => "class",
+									      "Prefix"       => "",
+									      "NamespaceURI" => "",
+									      "Value"        => "iptc-field",
+									     },
+							       }});
+	$self->SUPER::characters({Data=>$prop});
+	$self->SUPER::end_element({Name=>"span"});
+	
+	$self->SUPER::start_element({Name=>"span",Attributes =>{
+								"{}class" => {
+									      "Name"         => "class",
+									      "LocalName"    => "class",
+									      "Prefix"       => "",
+									      "NamespaceURI" => "",
+									      "Value"        => $prop,
+									     },
+							       }});
+	$self->SUPER::characters({Data=>($iptc->Attribute($prop) || "-")});
+	$self->SUPER::end_element({Name=>"span"});
+      }
+      
+      $self->SUPER::end_element({Name=>"div"});
+    }
+  }
+  
+  #
+  
+  if (scalar(@$exif_props) > 0) {
+    my $exif = EXIF->get($self->{'__src'});
+    if (($exif) && (EXIF->test($self->{'__src'}))) {
+      $self->SUPER::start_element({Name=>"div",Attributes => {
+							      "{}class" => {
+									    "Name"         => "class",
+									    "LocalName"    => "class",
+									    "Prefix"       => "",
+									    "NamespaceURI" => "",
+									    "Value"        => "exif",
+									   },
+							     }});
+      
+      foreach my $prop (@{$exif_props}) {
+	$self->SUPER::start_element({Name=>"span",Attributes =>{
+								"{}class" => {
+									      "Name"         => "class",
+									      "LocalName"    => "class",
+									      "Prefix"       => "",
+									      "NamespaceURI" => "",
+									      "Value"        => "exif-field",
+									     },
+							       }});
+	$self->SUPER::characters({Data=>$prop});
+	$self->SUPER::end_element({Name=>"span"});
+	
+	$self->SUPER::start_element({Name=>"span",Attributes =>{
+								"{}class" => {
+									      "Name"         => "class",
+									      "LocalName"    => "class",
+									      "Prefix"       => "",
+									      "NamespaceURI" => "",
+									      "Value"        => $prop,
+									     },
+							       }});
+	
+	my $exif_value = $exif->{$prop} || "-";
+	if (ref($exif_value) eq "ARRAY") {
+	  $exif_value = join(",",@$exif_value);
+	}
+	
+	$self->SUPER::characters({Data=>$exif_value});
+	$self->SUPER::end_element({Name=>"span"});
+      }
+      
+      $self->SUPER::end_element({Name=>"div"});
+    }
+  }
+  
+  delete $self->{'__src'};
+  return 1;
+}
+
+package MySAX_Scaled;
+use base qw (XML::SAX::Base);
+
+use Image::Shoehorn;
+
+my $files = [];
+
+sub files { return $files; }
+
+sub new {
+  my $pkg = shift;
+  my $self = {};
+
+  bless $self,$pkg;
+
+  $files = [];
+  return $self->SUPER::new(@_);
+}
+
+sub parse_uri {
+  my $self = shift;
+  my $uri  = shift;
+
+  if (! -f $uri) {
+    return;
+  }
+
+  push @$files,$uri;
+
+  print STDERR "[parse-uri] Adding $uri\n"
+    if (Image::Shoehorn::Gallery->verbose());
+
+  #
+
+  my $scales = Image::Shoehorn::Gallery->scales();
+  my %to_scale = ();
+
+  foreach my $sname (keys %{$scales}) {
+    next unless $scales->{$sname};
+
+    my $sfile = join("/",Image::Shoehorn::Gallery->cur_directory(),Image::Shoehorn->scaled_name([$uri,$sname]));
+
+    if (Image::Shoehorn::Gallery->force() >= 2) {
+      $to_scale{$sname} = $scales->{$sname};
+    }
+
+    elsif ((stat($uri))[9] > (stat($sfile))[9]) {
+      $to_scale{$sname} = $scales->{$sname};
+    }
+
+    else {}
+
+  }
+
+  #
+
+  if (keys %to_scale) {
+
+    # We do this because otherwise the image
+    # scaling widgets start gobbling up all the 
+    # available swap space and eventually the OS
+    # kills the program :-(
+
+    my $cmd = "/usr/local/bin/perl -e \'use Image::Shoehorn; ";
+
+    $cmd   .= "my \$image = Image::Shoehorn->new({";
+    $cmd   .= "tmpdir  => \"".Image::Shoehorn::Gallery->cur_directory()."\",cleanup => sub {},}) ";
+    $cmd   .= "|| die Image::Shoehorn->last_error();";
+    $cmd   .= "print STDERR \"Scaling $uri...\"; ";
+    $cmd   .= "\$image->import({";
+    $cmd   .= "source => \"$uri\",";
+    $cmd   .= "scale => {";
+    map { $cmd .= "\"$_\" => \"$to_scale{$_}\","; } keys %to_scale;
+    $cmd   .= "}}) || die Image::Shoehorn->last_error();";
+    $cmd   .= "print \"OK\\n\";";
+    $cmd   .= "'";
+
+    system($cmd);
+  }
+
+  #
+
+  $self->SUPER::start_element({Name=>"ul"});
+
+  foreach my $scale (@{Image::Shoehorn::Gallery->views}) {
+
+    my $path = Image::Shoehorn::Gallery->page_for_image([Image::Shoehorn::Gallery->format_link($uri),$scale]);
+
+    $self->SUPER::start_element({Name=>"li"});
+    $self->SUPER::start_element({Name=>"a",Attributes=>{
+							'{}href' => {
+								     Name         => "href",
+								     LocalName    => "href",
+								     Prefix       => "",
+								     NamespaceURI => "",
+								     Value        => $path,
+								    },
+						       }});
+    $self->SUPER::characters({Data=>$scale});
+    $self->SUPER::end_element({Name=>"a"});
+    $self->SUPER::end_element({Name=>"li"});
+  }
+
+  $self->SUPER::end_element({Name=>"ul"});
+  return;
+}
+
+package IPTC;
+use Image::IPTCInfo;
+
+my %iptc  = ();
+my %views = ();
+
+sub get {
+  my $pkg  = shift;
+  my $path = shift;
+
+  if (exists $iptc{$path}) {
+    return $iptc{$path};
+  }
+
+  $iptc{$path} = Image::IPTCInfo->new($path);
+
+  if (! ref($iptc{$path})) {
+    $iptc{$path} = undef;
+  }
+
+  return $iptc{$path};
+}
+
+sub test {
+  my $pkg = shift;
+  my $path = shift;
+
+  if (exists($views{$path})) {
+    return $views{$path};
+  }
+
+  if (! $iptc{$path}) {
+    return 0;
+  }
+
+  foreach my $view (@{Image::Shoehorn::Gallery->iptc()}) {
+    if ($iptc{$path}->Attribute($view)) {
+      $views{$path} = 1;
+      return 1;
+    }
+  }
+
+  $views{$path} = 0;
+  return 0;
+}
+
+package EXIF;
+use Image::Info qw (image_info);
+
+my %exif  = ();
+my %views = ();
+
+sub get {
+  my $pkg  = shift;
+  my $path = shift;
+
+  if (exists $exif{$path}) {
+    return $exif{$path};
+  }
+
+  $exif{$path} = image_info($path);
+
+  if ($exif{'error'}) {
+    $exif{$path} = undef;
+  }
+
+  return $exif{$path};
+}
+
+sub test {
+  my $pkg  = shift;
+  my $path = shift;
+
+  if (exists($views{$path})) {
+    return $views{$path};
+  }
+
+  foreach my $view (@{Image::Shoehorn::Gallery->exif()}) {
+    if ($exif{$path}->{$view}) {
+      $views{$path} = 1;
+      return 1;
+    }
+  }
+
+  $views{$path} = 0;
+  return 0;
+}
+
+package STYLESHEET;
+my $data = undef;
+
+sub data {
+  if ($data) { return $data; }
+  while (<DATA>) { $data .= $_;  }
+  return $data;
+}
+
+return 1;
+
+# NOTE : we are not setting the public and system doctypes here
+# because they cause even more weirdness with XML::LibXML and it's
+# seeming inability to deal with XHTML files. I really don't get
+# what's going on so we play a little game and set them event the 
+# xml_decl event in the MySAX_Image filter is called next. Gah!
+
+# NOTE ALSO : that this is also where we happen to set the encoding
+
+__DATA__
+<?xml version="1.0" encoding='iso-8859-1'?>
+
+<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+                version = "1.0" >
+
+<xsl:output method = "xml" 
+            indent = "yes" />
+
+<xsl:param name = "id" />
+<xsl:param name = "scales" />
+<xsl:param name = "scale" />
+<xsl:param name = "static" />
+
+<!-- ======================================================================
+     ====================================================================== -->
+
+ <xsl:variable name = "_scale">
+  <xsl:choose>
+   <xsl:when test = "contains($scales,$scale)">
+    <xsl:value-of select = "$scale" />
+   </xsl:when>
+   <xsl:otherwise></xsl:otherwise>
+  </xsl:choose>
+ </xsl:variable>
+
+ <xsl:variable name = "has_id">
+  <xsl:choose>
+   <xsl:when test = "/html/body/div[@id=$id]">1</xsl:when>
+   <xsl:otherwise>0</xsl:otherwise>
+  </xsl:choose>
+ </xsl:variable>
+
+
+<!-- ======================================================================
+     ====================================================================== -->
+
+ <xsl:template match="/">
+  <html>
+   <head>
+     <title>
+      <xsl:call-template name = "PageTitle" />
+      <xsl:if test = "number($has_id) > 0"> || <xsl:call-template name = "ImageTitle" /></xsl:if>
+    </title>
+    <style type = "text/css">
+      <![CDATA[ <!--
+.foo {}
+
+.menu {
+        margin-bottom:5px;
+        padding:5px;
+}
+
+.menu-link-previous {
+		padding-right : 10px;
+}
+
+.menu-link-previous img {
+		margin-right:15px;
+}
+
+.menu-link-index {
+		 font-weight:600;
+}
+
+.menu-link-next {
+		padding-left : 10px;
+}
+
+.menu-link-next img {
+		margin-left:15px;
+}
+
+.content {
+        padding-top:20px;
+      }
+
+.image { 
+        position:absolute;
+        top:auto;
+        right:auto;
+        left:170px;
+        bottom:auto;
+}
+
+.meta { 
+        min-width:150px;
+        max-width:150px;
+}  
+     
+.links {
+        border: solid thin;
+        margin-bottom: 5px;
+}
+
+.links span {
+        display:block;
+	padding:3px;
+}
+
+.iptc { 
+        background-color : #fffff0;
+        border-top: solid thin; 
+        border-left: solid thin;
+        border-right: solid thin;
+        margin-bottom : 5px;
+      }
+
+.iptc span { 
+        display:block; 
+        padding:3px;
+        border-bottom:solid thin;
+}
+
+.iptc-field { 
+        background-color : #f5f5dc;
+        color:#a52a2a;
+        border-bottom:solid thin #000;
+        }
+
+.exif { 
+        background-color : #f5f5dc;
+        border-top: solid thin; 
+        border-left: solid thin; 
+        border-right: solid thin; 
+        margin-bottom : 5px; 
+        }
+
+.exif span { 
+        display:block; 
+        padding:3px;
+        border-bottom:solid thin;
+}
+
+.exif-field { 
+        color:#a52a2a;
+        background-color:#cccc99;
+        border-bottom:solid thin #000;
+        }
+
+
+      --> ]]>
+    </style>
+   </head>
+   <body>
+    <xsl:call-template name = "Body" />
+   </body>
+  </html>
+ </xsl:template>
+
+<!-- ======================================================================
+     ====================================================================== -->
+
+ <xsl:template name = "Body">
+
+  <div>
+   <xsl:attribute name = "class">menu</xsl:attribute>
+   <xsl:call-template name = "Menu" />
+  </div>
+
+  <div>
+   <xsl:attribute name = "class">content</xsl:attribute>
+   <xsl:call-template name = "Image" />
+  </div>
+
+ </xsl:template>
+
+<!-- ======================================================================
+     ====================================================================== -->
+
+ <xsl:template name = "Image">
+   <xsl:variable name = "image">
+    <xsl:value-of select = "/html/body/div[@id=$id]/div[@class='thumbnail']/img/@src" />               
+   </xsl:variable>
+
+   <div>
+    <xsl:attribute name = "class">image</xsl:attribute>
+
+    <!-- If you're getting all freaked out because there are no
+         height or width attributes, don't worry. The SAX handler 
+         will deal with them. -->
+
+    <img>
+     <xsl:attribute name = "id">main</xsl:attribute>
+     <xsl:attribute name = "src">
+
+      <xsl:choose>
+
+        <!-- If $static == 1 then the thumbnail is static
+             If $static == 2 then all the images are static -->
+
+       <xsl:when test = "number($static) > 1">
+
+         <!-- perhaps a better way to do this is :
+              substring-before @href,".html" + 
+              substring-after $src,"." 
+              basically, the issue is how to determine
+              the extension for the image.-->
+
+        <xsl:value-of select = "substring-before($image,'-thumb.')" /><xsl:if test = "$scale != ''">-<xsl:value-of select = "$scale" /></xsl:if>.<xsl:value-of select = "substring-after($image,'-thumb.')" />
+       </xsl:when>
+
+       <xsl:when test = "number($static) > 0">
+        <xsl:value-of select = "substring-before($image,'-thumb.')" />.<xsl:value-of select = "substring-after($image,'-thumb.')" /><xsl:if test = "$scale != ''">?scale=<xsl:value-of select = "$scale" /></xsl:if>
+       </xsl:when>
+
+       <xsl:otherwise>
+        <xsl:value-of select = "substring-before($image,'?scale=')" /><xsl:if test = "$scale != ''">?scale=<xsl:value-of select = "$scale" /></xsl:if>           
+       </xsl:otherwise>
+      </xsl:choose>
+     </xsl:attribute>
+    </img>
+   </div>
+
+   <div>
+    <xsl:attribute name = "class">meta</xsl:attribute>
+
+    <div>
+     <xsl:attribute name = "class">links</xsl:attribute>
+     <xsl:call-template name = "Links">
+      <xsl:with-param name = "this_page" select = "/html/body/div[@id=$id]/a/@href"/>
+      <xsl:with-param name = "current_scale" select = "$scale"/>
+     </xsl:call-template>
+    </div>
+
+   </div>
+ </xsl:template>
+
+<!-- ======================================================================
+     ====================================================================== -->
+
+ <xsl:template name = "Menu">
+
+    <xsl:variable name  = "prev">
+     <xsl:value-of select = "/html/body/div[@id=$id]/preceding-sibling::*[1]/a/@href" />
+    </xsl:variable>
+
+    <xsl:variable name  = "next">
+     <xsl:value-of select = "/html/body/div[@id=$id]/following-sibling::*[1]/a/@href" />
+    </xsl:variable>
+
+<!-- <xsl:copy-of select = "/html/body/div[@class='file' or 'directory'][position()=1]/div[@class='thumbnail']/*" /> -->
+
+    <xsl:variable name = "last" select = "count(/html/body/div[@class='file' or 'directory'])" />
+
+    <xsl:variable name = "prev_title">
+     <xsl:choose>
+      <xsl:when test = "$prev != ''">
+       <xsl:value-of select = "/html/body/div[@id=$id]/preceding-sibling::*[1]/a" />
+      </xsl:when>
+      <xsl:otherwise>
+       <xsl:value-of select = "/html/body/div[@class='file' or 'directory'][position()=$last]/a" />
+      </xsl:otherwise>
+     </xsl:choose>
+    </xsl:variable>
+
+      <xsl:variable name = "prev_href">
+       <xsl:choose>
+        <xsl:when test = "$prev != ''">
+         <xsl:value-of select = "$prev" />
+        </xsl:when>
+        <xsl:otherwise>
+         <xsl:value-of select = "/html/body/div[@class='file' or 'directory'][position()=$last]/a/@href" />
+        </xsl:otherwise>
+       </xsl:choose>
+      </xsl:variable>
+
+     <xsl:variable name = "next_title">
+      <xsl:choose>
+       <xsl:when test = "$next != ''">
+        <xsl:value-of select = "/html/body/div[@id=$id]/following-sibling::*[1]/a" />
+       </xsl:when>
+       <xsl:otherwise>
+        <xsl:value-of select = "/html/body/div[@class='file' or 'directory'][position()=1]/a" />
+       </xsl:otherwise>
+      </xsl:choose>
+     </xsl:variable>
+
+     <xsl:variable name = "next_href">
+      <xsl:choose>
+       <xsl:when test = "$next != ''">
+        <xsl:value-of select = "$next" />
+       </xsl:when>
+       <xsl:otherwise>
+        <xsl:value-of select = "/html/body/div[@class='file' or 'directory'][position()=1]/a/@href" />
+       </xsl:otherwise>
+      </xsl:choose>
+     </xsl:variable>
+
+    <!-- -->
+
+    <span>
+     <xsl:attribute name = "class">menu-link-previous</xsl:attribute>
+
+     <xsl:choose>
+      <xsl:when test = "$prev != ''">
+       <xsl:copy-of select = "/html/body/div[@id=$id]/preceding-sibling::*[1]/div[@class='thumbnail']/*" />
+      </xsl:when>
+      <xsl:otherwise>
+       <xsl:copy-of select = "/html/body/div[@class='file' or 'directory'][position()=$last]/div[@class='thumbnail']/*" />
+      </xsl:otherwise>
+     </xsl:choose>
+
+     <a>
+      <xsl:attribute name = "href">
+
+       <xsl:choose>
+        <xsl:when test = "substring-before($prev_href,'.html')">
+         <xsl:value-of select = "substring-before($prev_href,'.html')" /><xsl:if test = "$scale != ''">-<xsl:value-of select = "$scale" /></xsl:if>.html
+        </xsl:when>
+        <xsl:otherwise>
+         <xsl:value-of select = "$prev_href" />
+        </xsl:otherwise>
+       </xsl:choose>
+
+      </xsl:attribute>
+
+      <xsl:attribute name = "title">
+       <xsl:value-of select = "$prev_title" />
+      </xsl:attribute>
+ 
+      <xsl:value-of select = "$prev_title" />
+     </a>
+
+     </span>
+
+
+  <!-- -->
+
+  <span>
+   <xsl:attribute name = "class">menu-link-index</xsl:attribute>
+   <a>
+    <xsl:attribute name = "href">index.html</xsl:attribute>      
+    <xsl:call-template name = "PageTitle"/>
+   </a>
+  </span>
+
+  <!-- -->
+
+    <span>
+     <xsl:attribute name = "class">menu-link-next</xsl:attribute>
+
+     <a>
+      <xsl:attribute name = "href">
+
+       <xsl:choose>
+        <xsl:when test = "substring-before($next_href,'.html')">
+         <xsl:value-of select = "substring-before($next_href,'.html')" /><xsl:if test = "$scale != ''">-<xsl:value-of select = "$scale" /></xsl:if>.html
+        </xsl:when>
+        <xsl:otherwise>
+         <xsl:value-of select = "$next_href" />
+        </xsl:otherwise>
+       </xsl:choose>
+
+      </xsl:attribute>
+
+      <xsl:attribute name = "title">
+       <xsl:value-of select = "$next_title" />
+      </xsl:attribute>
+ 
+      <xsl:value-of select = "$next_title" />
+     </a>
+
+     <xsl:choose>
+      <xsl:when test = "$next != ''">
+       <xsl:copy-of select = "/html/body/div[@id=$id]/following-sibling::*[1]/div[@class='thumbnail']/*" />
+      </xsl:when>
+      <xsl:otherwise>
+       <xsl:copy-of select = "/html/body/div[@class='file' or 'directory'][position()=1]/div[@class='thumbnail']/*" />
+      </xsl:otherwise>
+     </xsl:choose>
+
+    </span>
+
+ </xsl:template>
+
+<!-- ======================================================================
+     ====================================================================== -->
+
+ <xsl:template name = "PageTitle">
+  <xsl:value-of select = "/html/head/title" />   
+ </xsl:template>
+
+<!-- ======================================================================
+     ====================================================================== -->
+
+ <xsl:template name = "ImageTitle">
+  <xsl:value-of select = "/html/body/div[@id=$id]/a" />   
+ </xsl:template>
+
+<!-- ======================================================================
+     ====================================================================== -->
+
+ <xsl:template name = "Links">
+  <xsl:param name = "this_page" />
+  <xsl:param name = "current_scale" />
+
+  <xsl:if test = "$current_scale != ''">
+   <span>
+   <xsl:attribute name = "class">linkitem</xsl:attribute>
+   <a>
+    <xsl:attribute name = "href">
+     <xsl:value-of select = "$this_page"/>
+    </xsl:attribute>
+    original         
+   </a>
+   </span>
+  </xsl:if>
+
+  <xsl:call-template name = "_Links">
+   <xsl:with-param name = "str" select = "$scales" />  
+   <xsl:with-param name = "this_page" select = "$this_page" />
+   <xsl:with-param name = "current_scale" select = "$current_scale" />
+  </xsl:call-template>
+
+ </xsl:template>
+
+<!-- ======================================================================
+     ====================================================================== -->
+
+ <xsl:template name = "_Links">
+  <xsl:param name = "str" />
+  <xsl:param name = "this_page" />
+  <xsl:param name = "current_scale" />
+
+   <xsl:choose>
+    <xsl:when test="contains($str,',')">
+     <xsl:variable name = "this_scale" select = "substring-before($str,',')" />
+     <xsl:variable name = "that_scale" select = "substring-after($str,',')" />
+
+     <xsl:if test = "$this_scale != $current_scale">
+      <xsl:call-template name = "Scale">
+       <xsl:with-param name = "this_page" select = "$this_page" />
+       <xsl:with-param name = "this_scale" select = "substring-before($str,',')" />
+      </xsl:call-template>          
+     </xsl:if>
+
+     <xsl:call-template name = "_Links">
+      <xsl:with-param name="str" select="substring-after($str,',')"/>
+      <xsl:with-param name = "this_page" select = "$this_page" />
+      <xsl:with-param name = "current_scale" select = "$current_scale" />
+     </xsl:call-template>
+
+    </xsl:when>
+    <xsl:otherwise>
+     <xsl:if test = "$str != $current_scale">
+      <xsl:call-template name = "Scale">
+       <xsl:with-param name = "this_page" select = "$this_page" />
+       <xsl:with-param name = "this_scale" select = "$str" />
+      </xsl:call-template>        
+     </xsl:if>
+    </xsl:otherwise>
+  </xsl:choose>
+ </xsl:template>
+
+<!-- ======================================================================
+     ====================================================================== -->
+
+ <xsl:template name = "Scale">
+  <xsl:param name = "this_page" />
+  <xsl:param name = "this_scale" />
+  <span>
+  <xsl:attribute name = "class">linkitem</xsl:attribute>
+  <a>
+   <xsl:attribute name = "href">
+    <xsl:value-of select = "substring-before($this_page,'.html')"/>-<xsl:value-of select = "$this_scale" />.html
+   </xsl:attribute>
+   <xsl:value-of select = "$this_scale"/>
+  </a>
+  </span>
+ </xsl:template>
+
+<!-- ======================================================================
+     $Date: 2002/07/24 03:29:55 $
+     ====================================================================== -->
+
+</xsl:stylesheet>
+
