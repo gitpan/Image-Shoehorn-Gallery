@@ -1,5 +1,25 @@
 Revision history for Perl extension Image::Shoehorn::Gallery
 
-0.1	Wed Jul 25 2002
+0.2	Wed Jul 31 2002
+
+	- Absolutely nothing in the TO DO list from 0.1
+
+	- Added hooks to specify separate source and destination directories
+
+	- Added hooks for 'default' image size
+
+	- Added hooks for 'scaleif'
+
+	- Added hooks to set lang attribute in <html> element
+
+	- Added <link rel = (start|contents|prev|next) ...> elements
+
+	- Added &source_to_dest
+	
+	- Added &do_scale
+
+	- Updated POD
+
+0.1	Wed Jul 24 2002
 
 	- Initial revision

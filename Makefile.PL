@@ -16,6 +16,7 @@ WriteMakefile(
 				 XML::Filter::XSLT                 => '0.03',
 				 File::Basename                    => 0,
 				 File::Copy                        => 0,
+				 File::Path                        => 0,
 				 DirHandle                         => 0,
 				 IO::File                          => 0,
 				 Carp                              => 0,

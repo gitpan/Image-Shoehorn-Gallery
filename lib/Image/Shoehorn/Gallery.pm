@@ -7,16 +7,19 @@ Image::Shoehorn::Gallery - generate "smart" HTML slideshows from a directory of 
  use Image::Shoehorn::Gallery;
 
  Image::Shoehorn::Gallery->create({
+   	 	                   source      => "~/my-images",
    	 	                   directory   => "/htdocs/images",
 		                   url         => "http://mysite.com/images",
 		                   static      => 1,
 		                   scales      => [
-				                   [ "thumb","75x50" ],
-				                   [ "small","25%"   ],
-				                   [ "medium","50%"  ],
+				                   [ "thumb","75x50"  ],
+                                                   [ "default", "50%" ],
+				                   [ "small","25%"    ],
+				                   [ "medium","50%"   ],
 				                ],
+                                   scale_if    => { x => 400 , y => 300 },
                                    iptc        => ["headline","caption/abstract"],
-                                   maxdepth    => 0,
+                                   set_lang    => "en-ca",
                                    set_styles  => {
                                                   image => [
                                                             {title=>"my css",href=>"/styles.css"},
@@ -82,7 +85,7 @@ Generates valid XHTML (strict) and CSS!
 use strict;
 package Image::Shoehorn::Gallery;
 
-$Image::Shoehorn::Gallery::VERSION = '0.1';
+$Image::Shoehorn::Gallery::VERSION = '0.2';
 
 use Carp;
 use Digest::MD5 qw (md5_hex);
@@ -91,6 +94,7 @@ use DirHandle;
 
 use File::Basename;
 use File::Copy;
+use File::Path;
 
 use Image::Shoehorn;
 use Image::Size qw (imgsize);
@@ -106,15 +110,22 @@ $XML::SAX::ParserPackage = "XML::SAX::Expat";
 #
 
 my $directory = undef;
+my $source    = undef;
+my $dest      = undef;
+
 my $url       = undef;
+
 my $static    = undef;
 my $scales    = {};
+my $scaleif   = {};
+
 my $views     = [];
 my $iptc      = [];
 my $exif      = [];
-my $conf      = undef;
+
 my $maxdepth  = undef;
 my $encoding  = undef;
+my $lang      = undef;
 
 my $styles    = {};
 my $filters   = {};
@@ -123,9 +134,13 @@ my $images    = {};
 my $verbose   = 0;
 my $force     = 0;
 
+my $conf      = undef;
+
 #
 
-my $cur_directory = undef;
+my $cur_source = undef;
+my $cur_dest   = undef;
+
 my $visit         = 0;
 
 =head1 PACKAGE METHODS
@@ -140,13 +155,27 @@ Valid arguments are :
 
 =item *
 
+B<source>
+
+String.
+
+This is the path to the directory that you want to read images from.
+
+=item *
+
+B<destination>
+
+String.
+
+This is the path to directory that you want to write images, and HTML files, to. If undefined, then the value of I<source> will be used.
+
+=item *
+
 B<directory>
 
 String. 
 
-The path on your file system where your images are kept.
-
-I<Required>
+Deprecated in favour of I<source> and I<destination>. If present, it will be used as *both* the source and destination directories.
 
 =item *
 
@@ -155,8 +184,6 @@ B<url>
 String. 
 
 The URL that maps to I<directory> on your webserver.
-
-I<Required>
 
 =item *
 
@@ -196,7 +223,7 @@ I<name>
 
 A name like "small" or "medium". This name is used as part of the naming scheme for images that have been scaled and their associate HTML pages.
 
-Names can be pretty much anything you'd like, although the name "thumb" is expected to be used for thumbnails.
+Names can be pretty much anything you'd like, with the exception of "thumb" and "default" which are discussed below.
 
 =item *
 
@@ -226,9 +253,75 @@ B<n>x
 
 =back
 
-You must atleast define a "thumb" scale.
+There are two special scale names :
+
+=over 4
+
+=item *
+
+I<thumb>
+
+You must define a thumb scale. It is used to generate thumbnails for the index page which are, in turn, used when generating the individual HTML pages for each image.
+
+=item *
+
+I<default>
+
+I<This feature is only supported for images that are rendered statically :-(>.
+
+Suppose your source images are very large and you would like to use a scaled version as the default image in your gallery. You may want to do this because you are concerned about people doing bad things with your high quality images or you don't want to pay the additional charges that your web-hosting service will charge you for all those 2-3 MB files. Or both.
+
+The default image is the default view and its dimensions are what all other scales are keyed off of.
+
+For example, your source image is 1200x840 and you define two scales (not including the 'thumb' scale.) The first is called 'small' and the second 'default'; both have a value of '50%'.
+
+I<Note: the hooks for creating default images are smart about paying attention to the scaleif options, discussed below.>
+
+Since you have defined a default image, it will be created in your source directory with the same basename as the source image itself. It will be half the size of the original, 600x420. The 'small' version will be created and will be half the size of the 'default' image, rather than the source, or 300x210.
+
+B<Remember to use this feature carefully if your source and destination directories are the same.> You could easily overwrite all your source images with newer default "sources".
 
 =back
+
+=back
+
+=item *
+
+B<scaleif>
+
+Hash reference.
+
+Define height and width values that will be used to determine whether or not an image should actually be scaled. 
+
+For example, it is unlikely that you will need to create a small version (say 25% the size of the original) if your source file is 100 by 150 pixels. You might - that's your business - but atleast this way you can opt out.
+
+Images will only be scaled if their height or width is greater than the height and/or width listed in this argument.
+
+You may define one or both of the following :
+
+=over 4
+
+=item *
+
+I<x>
+
+Int.
+
+The minimum width that an image must have to be scaled.
+
+=item *
+
+I<y>
+
+Int.
+
+The minimum height that an image must have to be scaled.
+
+=back
+
+Note that although multiple image files may not be created, if the source image is smaller than the dimensions passed in this argument, their associate HTML files will be generated. Don't worry, they'll point to the same unscaled image. 
+
+Think of it as the glass being half full.
 
 =item *
 
@@ -249,6 +342,14 @@ Array reference.
 A list of EXIF fields to read from an image. Fields are presented in the order they are defined.
 
 For a complete list of EXIF fields, please consult http://www.ba.wakwak.com/~tsuruzoh/Computer/Digicams/exif-e.html
+
+=item *
+
+B<set_lang>
+
+String.
+
+Set the language code for your HTML documents.
 
 =item *
 
@@ -508,10 +609,18 @@ sub create {
   %EXIF::exif  = ();
   %EXIF::views = ();
 
-  $directory = undef;
+  $source    = undef;
+  $dest      = undef;
+
+  $cur_source = undef;
+  $cur_dest   = undef;
+
   $url       = undef;
   $static    = undef;
+
   $scales    = {};
+  $scaleif   = {};
+
   $views     = [];
   $iptc      = [];
   $exif      = [];
@@ -523,7 +632,7 @@ sub create {
   $images    = {};
 
   $encoding  = undef;
-
+  $lang      = undef;
   $verbose   = 0;
   $force     = 0;
 
@@ -535,10 +644,19 @@ sub create {
 
   #
 
-  if (! -d $args->{directory}) {
-    carp "$args->{directory} is not a directory.\n";
-    return 0;
+  if ($args->{directory}) {
+    $source = $args->{'directory'};
+    $dest   = $args->{'directory'};
   }
+
+  $source ||= $args->{source};
+
+  if (! -d $source) {
+    carp "Source ($source) is not a directory\n";
+    return undef;
+  }
+
+  $dest ||= $args->{'destination'} || $source;
 
   #
 
@@ -551,8 +669,7 @@ sub create {
 
   foreach ("iptc","exif") {
     if ((exists($args->{$_})) && (ref($args->{$_}) ne "ARRAY")) {
-      carp "$_ must be passed as an array reference.\n";
-      return 0;
+      carp "$_ must be passed as an array reference. Ignoring.\n";
     }
   }
 
@@ -560,16 +677,29 @@ sub create {
 
   foreach (@{$args->{scales}}) {
     if (ref($_) ne "ARRAY") {
-      carp;
+      carp "Arguments for 'scales' must be passed as an array ref of array refs. Ignoring\n";
       next;
     }
 
-    unless ($_->[0] eq "thumb") {
+    unless ($_->[0] =~ /^(thumb|default)$/) {
       push @{$views},$_->[0];
     }
 
     if ($_->[1]) { 
-      $scales->{$_->[0]} = $_->[1]; 
+      $scales->{$_->[0]} = $_->[1];
+    }
+  }
+
+  #
+
+  if ($args->{scaleif}) {
+    if (ref($args->{scaleif}) eq "HASH") {
+      map { 
+	$scaleif->{$_} = $args->{scaleif}->{$_} if (defined($args->{scaleif}->{$_})); 
+      } qw (x y);
+
+    } else {
+      carp "Argument 'scaleif' must be passed as a hash reference. Ignoring.\n";
     }
   }
 
@@ -590,12 +720,16 @@ sub create {
 	    $images->{$_} = $args->{set_index_images}->{$_};
 	  }
 
-	  else { carp "The $_ field must be passed as a hash ref or a code ref."; }
+	  else { 
+	    carp "The $_ field must be passed as a hash ref or a code ref. Ignoring.\n"; 
+	  }
 	}
       }
     }
 
-    else { carp "Passed as hash"; }
+    else { 
+      carp "Argument 'set_index_images' must be passed as hash reference. Ignoring.\n"; 
+    }
   }
 
   #
@@ -607,7 +741,7 @@ sub create {
 	next if (! exists($args->{set_styles}->{$type}));
 
 	if (ref($args->{set_styles}->{$type}) ne "ARRAY") {
-	  carp "Styles for $type must be passed as an array ref.\n";
+	  carp "Styles for $type must be passed as an array ref. Ignoring.\n";
 	  next;
 	}
 
@@ -615,7 +749,9 @@ sub create {
       }
     }
 
-    else { carp "Pass as hash ref"; }
+    else { 
+      carp "The argument 'set_styles' must be passed as a hash reference. Ignoring.\n"; 
+    }
   }
 
   #
@@ -627,7 +763,7 @@ sub create {
 	next if (! exists($args->{set_filters}->{$type}));
 
 	if (ref($args->{set_filters}->{$type}) ne "ARRAY") {
-	  carp "Filters for $type must be passed as an array ref.\n";
+	  carp "Filters for $type must be passed as an array ref. Ignoring.\n";
 	  next;
 	}
 
@@ -635,7 +771,9 @@ sub create {
       }
     }
 
-    else { carp "Pass as hash ref"; }
+    else { 
+      carp "You argument 'set_filters' must be passed as a hash reference. Ignoring.\n"; 
+    }
   }
 
   #
@@ -653,7 +791,6 @@ sub create {
 
   #
 
-  $directory = $args->{'directory'};
   $url       = $args->{'url'};
   $static    = $args->{'static'};
 
@@ -661,40 +798,19 @@ sub create {
   $exif      = $args->{'exif'} if ($args->{'exif'});
 
   $encoding  = $args->{'set_encoding'} if ($args->{'set_encoding'});
+  $lang      = $args->{'set_lang'} if ($args->{'set_lang'});
 
   $verbose   = $args->{verbose};
   $force     = $args->{force};
 
   #
 
-  &make_index($directory);
-  &visit($directory);
+  &visit($source);
+  &make_index($source);
 
   #
 
   return 1;
-}
-
-sub format_link {
-  my $pkg  = shift;
-
-  (my $link = $_[0]) =~ s/$directory/$url/;
-  return $link;
-}
-
-sub unformat_link {
-  my $pkg = shift;
-
-  (my $path = $_[0]) =~ s/$url/$directory/;
-  return $path;
-}
-
-sub page_for_image {
-    my $pkg = shift;
-
-    my $suffix = ($_[0]->[1]) ? "-".$_[0]->[1].".html" : ".html";
-    (my $output = $_[0]->[0]) =~ s/(.*)\.([^\.]+)$/$1$suffix/;
-    return $output;
 }
 
 sub read_conf {
@@ -735,12 +851,34 @@ sub make_index {
   print STDERR "[make-index] Making $path\n"
     if ($verbose);
 
-  $cur_directory = $path;
+  $cur_source = $path;
+  $cur_dest   = __PACKAGE__->source_to_dest($path);
 
-  my $html = "$path/index.html";
+  #
+
+  my $src = __PACKAGE__->source_to_dest($path);
+
+  if ((! -d $cur_dest) && (! mkpath($cur_dest,$verbose,0755))) {
+    carp "Failed to make '$cur_dest', $!\n";
+    return 0;
+  }
+
+  #
+
+  my $html = $cur_dest."/index.html";
   my $tmp  = $html.".tmp";
 
+  #
+
   my $output  = IO::File->new(">$tmp");
+
+  if (! $output) {
+    carp "Failed to open '$tmp' for writing, $!\n";
+    return 0;
+  }
+
+  #
+
   my $writer  = XML::SAX::Writer->new(Output=>$output);
 
   my $filters = __PACKAGE__->filters("index");
@@ -759,10 +897,14 @@ sub make_index {
 
   my $xhtml = XML::Filter::XML_Directory_2XHTML->new(Handler=>$machine);
 
-  $xhtml->debug();
+  $xhtml->debug(0);
 
   if ($encoding) {
     $xhtml->set_encoding($encoding);
+  }
+
+  if ($lang) {
+    $xhtml->set_lang($lang);
   }
 
   $xhtml->exclude_root(1);
@@ -824,11 +966,13 @@ sub make_index {
   $xhtml->set_callbacks({
 			 linktext  => \&format_linktext,
 			 link      => sub { 
-			   return (-d $_[0]) ? 
+			   return (-d $_[0]) ?
 			     __PACKAGE__->format_link($_[0]) : 
 			       __PACKAGE__->page_for_image([__PACKAGE__->format_link($_[0])]); 
 			 },
 			});
+
+  #
 
   $xhtml->set_handlers({file=>MySAX_Scaled->new(Handler=>$writer)});
 
@@ -872,7 +1016,7 @@ sub make_slides {
 
     foreach my $scale ("",@{$views}) {
 
-      my $html   = __PACKAGE__->page_for_image([$img,$scale]);
+      my $html = __PACKAGE__->source_to_dest(__PACKAGE__->page_for_image([$img,$scale]));
 
       #
 
@@ -897,11 +1041,14 @@ sub make_slides {
       # open(STYLESHEET,"<&=STYLESHEET::DATA");
       # $xsl->set_stylesheet_fh(\*STYLESHEET);
 
+      my $do_scale = __PACKAGE__->do_scale($img,$scales->{default});
+
       $xsl->set_stylesheet_parameters(
-				      id     => $sid,
-				      scale  => $scale,
-				      scales => join(",",@{&views()}),
-				      static => ($static) ? (scalar(keys %$scales) > 1) ? 2 : $static : 0,
+				      id      => $sid,
+				      doscale => $do_scale,
+				      scale   => $scale,
+				      scales  => ($do_scale) ? join(",",@{&views()}) : "",
+				      static  => ($static) ? (scalar(keys %$scales) > 1) ? 2 : $static : 0,
 				     );
 
       my $filters = __PACKAGE__->filters("image");
@@ -926,6 +1073,35 @@ sub make_slides {
   return 1;
 }
 
+sub format_link {
+  my $pkg  = shift;
+
+  (my $link = $_[0]) =~ s/$source/$url/;
+  return $link;
+}
+
+sub unformat_link {
+  my $pkg = shift;
+
+  (my $path = $_[0]) =~ s/$url/$source/;
+  return $path;
+}
+
+sub page_for_image {
+  my $pkg   = shift;
+
+  my $suffix = ($_[0]->[1]) ? "-".$_[0]->[1].".html" : ".html";
+  (my $output = $_[0]->[0]) =~ s/(.*)\.([^\.]+)$/$1$suffix/;
+
+  return $output;
+}
+
+sub source_to_dest {
+  my $pkg = shift;
+  $_[0] =~ /^($source)(\/(.*))?$/;
+  return $dest.$2;
+}
+
 sub define_thumbnail {
   my $path = shift;
 
@@ -934,10 +1110,10 @@ sub define_thumbnail {
   ($x,$y) = imgsize($path);
   ($x,$y) = Image::Shoehorn->scaled_dimensions([$x,$y,undef,50]);
 
-  my $title = $path;
+  my $title = &basename($path);
 
   if (my $iptc = IPTC->get($path)) {
-    $title = $iptc->Attribute("headline");
+    $title = $iptc->Attribute("headline") || $iptc->Attribute("caption/abstract") || $title;
   }
 
   my $src = __PACKAGE__->format_link($path);
@@ -973,16 +1149,64 @@ sub format_linktext {
   return $_[1];
 }
 
-sub directory {
-  return $directory;
+sub do_scale {
+  my $pkg = shift;
+  my $uri = shift;
+  my $def = shift;
+
+  if (! keys %$scaleif) {
+    return 1;
+  }
+
+  my ($x,$y) = Image::Size::imgsize($uri);
+
+  if ($def) {
+    ($x,$y) = Image::Shoehorn->dimensions_for_scale($x,$y,$def);
+  }
+
+  if (defined($scaleif->{'x'}) && defined($scaleif->{'y'})) {
+    if (($x <= $scaleif->{'x'}) && ($y <= $scaleif->{'y'})) {
+      return 0;
+    }
+  }
+  
+  elsif (defined($scaleif->{'x'})) {
+    if ($x <= $scaleif->{'x'}) {
+      return 0;
+    }
+  }
+  
+  elsif (defined($scaleif->{'y'})) {
+    if ($y <= $scaleif->{'y'}) {
+      return 0;
+    }
+  }
+  
+  else { 
+    return 1;
+  }
+
+  return 1;
+}
+
+sub source {
+  return $source;
+}
+
+sub destination {
+  return $dest;
+}
+
+sub cur_source {
+  return $cur_source;
+}
+
+sub cur_destination {
+  return $cur_dest;
 }
 
 sub scales {
   return $scales;
-}
-
-sub cur_directory {
-  return $cur_directory;
 }
 
 sub views {
@@ -1009,12 +1233,20 @@ sub encoding {
   return $encoding;
 }
 
+sub lang {
+  return $lang;
+}
+
 sub force {
   return $force;
 }
 
 sub verbose {
   return $verbose;
+}
+
+sub scale_if { 
+  return $scaleif;
 }
 
 =head1 NAMING CONVENTIONS
@@ -1178,7 +1410,7 @@ They are provided as a reference in case you want to specify your own CSS styles
 
 =head1 VERSION
 
-0.1
+0.2
 
 =head1 AUTHOR
 
@@ -1186,7 +1418,7 @@ Aaron Straup Cope
 
 =head1 DATE
 
-July 25, 2002
+July 31, 2002
 
 =head1 TO DO
 
@@ -1194,7 +1426,17 @@ July 25, 2002
 
 =item *
 
-Add links to "parent" directory, where appropriate; need to determine whether or not this is a XML::Filter::XML_Directory_2XHTML thing.
+Add links to "parent" directory -- or breadcrumbs -- for indices; need to determine whether or not this is a XML::Filter::XML_Directory_2XHTML thing.
+
+I<Barring any unforeseen bugs, this will be the sole focus of version 0.2.1>
+
+=item *
+
+Teach I<Apache::Image::Shoehorn> how to deal with 'default' images, as described above.
+
+=item *
+
+Add an "import_styles" method, to take advantage of @import hack for hiding CSS from old browsers. Might just add {import=>1} option to "set_styles".
 
 =item *
 
@@ -1220,13 +1462,21 @@ Add hooks for supporting I<XML::Filter::Sort>
 
 Consider I<interactive> option that would prompt user for IPTC data as files are being processed.
 
+=item *
+
+Design and implement nightmarish XPath to generate XSLT stylesheet from a user-defined template. I promised Karl I would do this for v 0.3 but we'll see...
+
 =back
 
-=head1 SEE ALSO
+=head1 BACKGROUND
+
+http://aaronland.net/weblog/archive/3940
+
+http://aaronland.net/weblog/archive/4474
 
 http://www.la-grange.net/2002/07/22.html
 
-http://aaronland.info/weblog/archive/4474
+=head1 EXAMPLE
 
 http://perl.aaronland.info/image/shoehorn/gallery/www/example/index.html
 
@@ -1247,6 +1497,10 @@ I<Image::IPTCInfo>
 I<Image::Info>
 
 I<Digest::MD5>
+
+=head1 BUGS
+
+Undoubtedly. So far, it works for me.
 
 =head1 LICENSE
 
@@ -1348,6 +1602,28 @@ sub start_element {
 
     #
 
+    if (($data->{Name} eq "html") && (Image::Shoehorn::Gallery->lang())) {
+
+      $self->SUPER::start_prefix_mapping({Prefix=>"",NamespaceURI=>"http://www.w3.org/1999/xhtml"});
+
+      $self->SUPER::start_element({Name=>"html",Attributes=>{
+							     "{}lang" => {Name         => "lang",
+									  Value        => Image::Shoehorn::Gallery->lang(),
+									  Prefix       => "",
+									  LocalName    => "lang",
+									  NamespaceURI => "",
+									 },
+							     "{}xml:lang" => {
+									      Name => "xml:lang",
+									      Value => Image::Shoehorn::Gallery->lang(),
+									      Prefix       => "xml",
+									      LocalName    => "xml:lang",
+									      NamespaceURI => "http://www.w3.org/1999/xhtml",
+									    },
+							    }});
+      return 1;
+    }
+
     if (($data->{Name} eq "style") && ($self->{'__styles'})){
 
       foreach my $style (@{Image::Shoehorn::Gallery->styles("image")}) {
@@ -1389,6 +1665,8 @@ sub start_element {
 	($data->{Attributes}->{'{}id'}->{'Value'} eq "main")) {
 
       my $src = Image::Shoehorn::Gallery->unformat_link($data->{Attributes}->{'{}src'}->{'Value'});
+      $src = Image::Shoehorn::Gallery->source_to_dest($src);
+
       my ($x,$y);
 
       #
@@ -1460,6 +1738,10 @@ sub end_element {
   }
 
   $self->SUPER::end_element($data);
+
+  if ($self->{Name} eq "html") {
+    $self->SUPER::end_prefix_mapping({Prefix=>""});
+  }
 
   if (($data->{Name} eq "div") && (exists($self->{'__meta'}))) {
     $self->add_metadata();
@@ -1591,6 +1873,7 @@ package MySAX_Scaled;
 use base qw (XML::SAX::Base);
 
 use Image::Shoehorn;
+use Image::Size qw (imgsize);
 
 my $files = [];
 
@@ -1621,13 +1904,31 @@ sub parse_uri {
 
   #
 
-  my $scales = Image::Shoehorn::Gallery->scales();
+  my $scales  = Image::Shoehorn::Gallery->scales();
+  my $default = $scales->{default};
+
+  my $scale   = Image::Shoehorn::Gallery->do_scale($uri,$default);
+
+  #
+
   my %to_scale = ();
 
   foreach my $sname (keys %{$scales}) {
-    next unless $scales->{$sname};
 
-    my $sfile = join("/",Image::Shoehorn::Gallery->cur_directory(),Image::Shoehorn->scaled_name([$uri,$sname]));
+    # unless ($sname =~ /^(thumb)$/) {
+    unless ($sname  eq "thumb") {
+      if (! $scale) {
+	next;
+      }
+    }
+
+    if (! $scales->{$sname}) {
+      next;
+    }
+
+    my $sfile = join("/",Image::Shoehorn::Gallery->cur_destination(),Image::Shoehorn->scaled_name([$uri,$sname]));
+
+    # print STDERR "COMPARING '$uri' w/ '$sfile' \n";
 
     if (Image::Shoehorn::Gallery->force() >= 2) {
       $to_scale{$sname} = $scales->{$sname};
@@ -1643,17 +1944,59 @@ sub parse_uri {
 
   #
 
+  if (((! $scale) && (! $default)) ||
+      (Image::Shoehorn::Gallery->destination() ne Image::Shoehorn::Gallery->source())) {
+
+    my $copy = Image::Shoehorn::Gallery->source_to_dest($uri);
+
+    unless ($copy eq $uri) {
+      require File::Copy;
+      &File::Copy::copy ($uri,$copy);
+    }
+  }
+
+  #
+
   if (keys %to_scale) {
+
+    if ($default) {
+
+      # print STDERR "ORIGINAL ".join(",",(imgsize($uri))[0,1])."\n";
+      my ($dx,$dy) = Image::Shoehorn->dimensions_for_scale((imgsize($uri))[0,1],$default);
+
+      # print STDERR "$uri $dx, $dy\n";
+      foreach (keys %to_scale) {
+	next if ($_ =~ /^(thumb|default)$/);
+
+	my ($nx,$ny) = Image::Shoehorn->dimensions_for_scale($dx,$dy,$to_scale{$_});
+	# print STDERR "N $nx, $ny\n";
+	$to_scale{$_} = join("x",$nx,$ny);
+      }
+
+      # use Data::Dumper;
+      # die &Dumper(\%to_scale);
+    }
+
+    #
 
     # We do this because otherwise the image
     # scaling widgets start gobbling up all the 
     # available swap space and eventually the OS
     # kills the program :-(
 
-    my $cmd = "/usr/local/bin/perl -e \'use Image::Shoehorn; ";
+    my $cmd = "/usr/local/bin/perl -e \'use Image::Shoehorn;";
 
     $cmd   .= "my \$image = Image::Shoehorn->new({";
-    $cmd   .= "tmpdir  => \"".Image::Shoehorn::Gallery->cur_directory()."\",cleanup => sub {},}) ";
+    $cmd   .= "tmpdir  => \"".Image::Shoehorn::Gallery->cur_destination()."\",cleanup => sub {";
+
+    # subroutine to rename 'default' :
+    $cmd   .= "my \$imgs = shift; return unless \$imgs->{default};";
+    $cmd   .= "(my \$new = \$imgs->{default}->{path}) =~ s/(.*)-default\\.([^\\.]+)\$/\$1\\.\$2/;";
+    $cmd   .= "rename \$imgs->{default}->{path},\$new";
+    $cmd   .= " || warn $!;";
+    # end subroutine
+
+    $cmd   .= "},}) ";
     $cmd   .= "|| die Image::Shoehorn->last_error();";
     $cmd   .= "print STDERR \"Scaling $uri...\"; ";
     $cmd   .= "\$image->import({";
@@ -1661,11 +2004,18 @@ sub parse_uri {
     $cmd   .= "scale => {";
     map { $cmd .= "\"$_\" => \"$to_scale{$_}\","; } keys %to_scale;
     $cmd   .= "}}) || die Image::Shoehorn->last_error();";
-    $cmd   .= "print \"OK\\n\";";
+    $cmd   .= "print STDERR \"OK\\n\";";
     $cmd   .= "'";
+
+    print STDERR $cmd,"\n"
+      if (Image::Shoehorn::Gallery->verbose() > 1);
 
     system($cmd);
   }
+
+  #
+
+  return unless ($scale);
 
   #
 
@@ -1813,19 +2163,11 @@ __DATA__
 <xsl:param name = "id" />
 <xsl:param name = "scales" />
 <xsl:param name = "scale" />
+<xsl:param name = "doscale" />
 <xsl:param name = "static" />
 
 <!-- ======================================================================
      ====================================================================== -->
-
- <xsl:variable name = "_scale">
-  <xsl:choose>
-   <xsl:when test = "contains($scales,$scale)">
-    <xsl:value-of select = "$scale" />
-   </xsl:when>
-   <xsl:otherwise></xsl:otherwise>
-  </xsl:choose>
- </xsl:variable>
 
  <xsl:variable name = "has_id">
   <xsl:choose>
@@ -1834,6 +2176,85 @@ __DATA__
   </xsl:choose>
  </xsl:variable>
 
+   <xsl:variable name = "image">
+    <xsl:value-of select = "/html/body/div[@id=$id]/div[@class='thumbnail']/img/@src" />
+   </xsl:variable>
+
+    <xsl:variable name  = "prev">
+     <xsl:value-of select = "/html/body/div[@id=$id]/preceding-sibling::*[1]/a/@href" />
+    </xsl:variable>
+
+    <xsl:variable name  = "next">
+     <xsl:value-of select = "/html/body/div[@id=$id]/following-sibling::*[1]/a/@href" />
+    </xsl:variable>
+
+    <xsl:variable name = "last" select = "count(/html/body/div[@class='file' or 'directory'])" />
+
+    <xsl:variable name = "prev_title">
+     <xsl:choose>
+      <xsl:when test = "$prev != ''">
+       <xsl:value-of select = "/html/body/div[@id=$id]/preceding-sibling::*[1]/a" />
+      </xsl:when>
+      <xsl:otherwise>
+       <xsl:value-of select = "/html/body/div[@class='file' or 'directory'][position()=$last]/a" />
+      </xsl:otherwise>
+     </xsl:choose>
+    </xsl:variable>
+
+      <xsl:variable name = "prev_href">
+       <xsl:choose>
+        <xsl:when test = "$prev != ''">
+         <xsl:value-of select = "$prev" />
+        </xsl:when>
+        <xsl:otherwise>
+         <xsl:value-of select = "/html/body/div[@class='file' or 'directory'][position()=$last]/a/@href" />
+        </xsl:otherwise>
+       </xsl:choose>
+      </xsl:variable>
+
+      <xsl:variable name = "prev_href_scaled">
+       <xsl:choose>
+        <xsl:when test = "substring-before($prev_href,'.html')">
+         <xsl:value-of select = "substring-before($prev_href,'.html')" /><xsl:if test = "$scale != ''">-<xsl:value-of select = "$scale" /></xsl:if>.html
+        </xsl:when>
+        <xsl:otherwise>
+         <xsl:value-of select = "$prev_href" />
+        </xsl:otherwise>
+       </xsl:choose>
+     </xsl:variable>
+
+     <xsl:variable name = "next_title">
+      <xsl:choose>
+       <xsl:when test = "$next != ''">
+        <xsl:value-of select = "/html/body/div[@id=$id]/following-sibling::*[1]/a" />
+       </xsl:when>
+       <xsl:otherwise>
+        <xsl:value-of select = "/html/body/div[@class='file' or 'directory'][position()=1]/a" />
+       </xsl:otherwise>
+      </xsl:choose>
+     </xsl:variable>
+
+     <xsl:variable name = "next_href">
+      <xsl:choose>
+       <xsl:when test = "$next != ''">
+        <xsl:value-of select = "$next" />
+       </xsl:when>
+       <xsl:otherwise>
+        <xsl:value-of select = "/html/body/div[@class='file' or 'directory'][position()=1]/a/@href" />
+       </xsl:otherwise>
+      </xsl:choose>
+     </xsl:variable>
+
+  <xsl:variable name = "next_href_scaled">
+   <xsl:choose>
+    <xsl:when test = "substring-before($next_href,'.html')">
+     <xsl:value-of select = "substring-before($next_href,'.html')" /><xsl:if test = "$scale != ''">-<xsl:value-of select = "$scale" /></xsl:if>.html
+    </xsl:when>
+    <xsl:otherwise>
+     <xsl:value-of select = "$next_href" />
+    </xsl:otherwise>
+   </xsl:choose>
+  </xsl:variable>
 
 <!-- ======================================================================
      ====================================================================== -->
@@ -1944,6 +2365,33 @@ __DATA__
 
       --> ]]>
     </style>
+    <!-- start,top,next,prev -->
+    <link>
+     <xsl:attribute name = "rel">start</xsl:attribute>
+     <xsl:attribute name = "title">
+      <xsl:value-of select = "/html/body/div[@class='file' or 'directory'][position()=1]/a" />
+     </xsl:attribute>
+     <xsl:attribute name = "href">
+      <xsl:value-of select = "/html/body/div[@class='file' or 'directory'][position()=1]/a/@href" />
+     </xsl:attribute>
+    </link>
+    <link>
+     <xsl:attribute name = "rel">contents</xsl:attribute>
+     <xsl:attribute name = "title">Index</xsl:attribute>
+     <!-- This is a bit lazy and opens up the possibility
+          for mistakes so it should be revisited. -->
+     <xsl:attribute name = "href">./index.html</xsl:attribute>
+    </link>
+    <link>
+     <xsl:attribute name = "rel">prev</xsl:attribute>
+     <xsl:attribute name = "title"><xsl:value-of select = "$prev_title" /></xsl:attribute>
+     <xsl:attribute name = "href"><xsl:value-of select = "$prev_href_scaled" /></xsl:attribute>  
+    </link>
+    <link>
+     <xsl:attribute name = "rel">next</xsl:attribute>
+     <xsl:attribute name = "title"><xsl:value-of select = "$next_title" /></xsl:attribute>
+     <xsl:attribute name = "href"><xsl:value-of select = "$next_href_scaled" /></xsl:attribute>  
+    </link>
    </head>
    <body>
     <xsl:call-template name = "Body" />
@@ -1972,9 +2420,6 @@ __DATA__
      ====================================================================== -->
 
  <xsl:template name = "Image">
-   <xsl:variable name = "image">
-    <xsl:value-of select = "/html/body/div[@id=$id]/div[@class='thumbnail']/img/@src" />               
-   </xsl:variable>
 
    <div>
     <xsl:attribute name = "class">image</xsl:attribute>
@@ -2000,7 +2445,7 @@ __DATA__
               basically, the issue is how to determine
               the extension for the image.-->
 
-        <xsl:value-of select = "substring-before($image,'-thumb.')" /><xsl:if test = "$scale != ''">-<xsl:value-of select = "$scale" /></xsl:if>.<xsl:value-of select = "substring-after($image,'-thumb.')" />
+        <xsl:value-of select = "substring-before($image,'-thumb.')" /><xsl:if test = "number($doscale) > 0"><xsl:if test = "$scale != ''">-<xsl:value-of select = "$scale" /></xsl:if></xsl:if>.<xsl:value-of select = "substring-after($image,'-thumb.')" />
        </xsl:when>
 
        <xsl:when test = "number($static) > 0">
@@ -2008,7 +2453,7 @@ __DATA__
        </xsl:when>
 
        <xsl:otherwise>
-        <xsl:value-of select = "substring-before($image,'?scale=')" /><xsl:if test = "$scale != ''">?scale=<xsl:value-of select = "$scale" /></xsl:if>           
+        <xsl:value-of select = "substring-before($image,'?scale=')" /><xsl:if test = "$scale != ''">?scale=<xsl:value-of select = "$scale" /></xsl:if>
        </xsl:otherwise>
       </xsl:choose>
      </xsl:attribute>
@@ -2018,13 +2463,15 @@ __DATA__
    <div>
     <xsl:attribute name = "class">meta</xsl:attribute>
 
-    <div>
-     <xsl:attribute name = "class">links</xsl:attribute>
-     <xsl:call-template name = "Links">
-      <xsl:with-param name = "this_page" select = "/html/body/div[@id=$id]/a/@href"/>
-      <xsl:with-param name = "current_scale" select = "$scale"/>
-     </xsl:call-template>
-    </div>
+    <xsl:if test = "number($doscale) > 0">
+     <div>
+      <xsl:attribute name = "class">links</xsl:attribute>
+      <xsl:call-template name = "Links">
+       <xsl:with-param name = "this_page" select = "/html/body/div[@id=$id]/a/@href"/>
+       <xsl:with-param name = "current_scale" select = "$scale"/>
+      </xsl:call-template>
+     </div>
+    </xsl:if>
 
    </div>
  </xsl:template>
@@ -2033,62 +2480,6 @@ __DATA__
      ====================================================================== -->
 
  <xsl:template name = "Menu">
-
-    <xsl:variable name  = "prev">
-     <xsl:value-of select = "/html/body/div[@id=$id]/preceding-sibling::*[1]/a/@href" />
-    </xsl:variable>
-
-    <xsl:variable name  = "next">
-     <xsl:value-of select = "/html/body/div[@id=$id]/following-sibling::*[1]/a/@href" />
-    </xsl:variable>
-
-<!-- <xsl:copy-of select = "/html/body/div[@class='file' or 'directory'][position()=1]/div[@class='thumbnail']/*" /> -->
-
-    <xsl:variable name = "last" select = "count(/html/body/div[@class='file' or 'directory'])" />
-
-    <xsl:variable name = "prev_title">
-     <xsl:choose>
-      <xsl:when test = "$prev != ''">
-       <xsl:value-of select = "/html/body/div[@id=$id]/preceding-sibling::*[1]/a" />
-      </xsl:when>
-      <xsl:otherwise>
-       <xsl:value-of select = "/html/body/div[@class='file' or 'directory'][position()=$last]/a" />
-      </xsl:otherwise>
-     </xsl:choose>
-    </xsl:variable>
-
-      <xsl:variable name = "prev_href">
-       <xsl:choose>
-        <xsl:when test = "$prev != ''">
-         <xsl:value-of select = "$prev" />
-        </xsl:when>
-        <xsl:otherwise>
-         <xsl:value-of select = "/html/body/div[@class='file' or 'directory'][position()=$last]/a/@href" />
-        </xsl:otherwise>
-       </xsl:choose>
-      </xsl:variable>
-
-     <xsl:variable name = "next_title">
-      <xsl:choose>
-       <xsl:when test = "$next != ''">
-        <xsl:value-of select = "/html/body/div[@id=$id]/following-sibling::*[1]/a" />
-       </xsl:when>
-       <xsl:otherwise>
-        <xsl:value-of select = "/html/body/div[@class='file' or 'directory'][position()=1]/a" />
-       </xsl:otherwise>
-      </xsl:choose>
-     </xsl:variable>
-
-     <xsl:variable name = "next_href">
-      <xsl:choose>
-       <xsl:when test = "$next != ''">
-        <xsl:value-of select = "$next" />
-       </xsl:when>
-       <xsl:otherwise>
-        <xsl:value-of select = "/html/body/div[@class='file' or 'directory'][position()=1]/a/@href" />
-       </xsl:otherwise>
-      </xsl:choose>
-     </xsl:variable>
 
     <!-- -->
 
@@ -2105,18 +2496,7 @@ __DATA__
      </xsl:choose>
 
      <a>
-      <xsl:attribute name = "href">
-
-       <xsl:choose>
-        <xsl:when test = "substring-before($prev_href,'.html')">
-         <xsl:value-of select = "substring-before($prev_href,'.html')" /><xsl:if test = "$scale != ''">-<xsl:value-of select = "$scale" /></xsl:if>.html
-        </xsl:when>
-        <xsl:otherwise>
-         <xsl:value-of select = "$prev_href" />
-        </xsl:otherwise>
-       </xsl:choose>
-
-      </xsl:attribute>
+      <xsl:attribute name = "href"><xsl:value-of select = "$prev_href_scaled" /></xsl:attribute>
 
       <xsl:attribute name = "title">
        <xsl:value-of select = "$prev_title" />
@@ -2144,18 +2524,7 @@ __DATA__
      <xsl:attribute name = "class">menu-link-next</xsl:attribute>
 
      <a>
-      <xsl:attribute name = "href">
-
-       <xsl:choose>
-        <xsl:when test = "substring-before($next_href,'.html')">
-         <xsl:value-of select = "substring-before($next_href,'.html')" /><xsl:if test = "$scale != ''">-<xsl:value-of select = "$scale" /></xsl:if>.html
-        </xsl:when>
-        <xsl:otherwise>
-         <xsl:value-of select = "$next_href" />
-        </xsl:otherwise>
-       </xsl:choose>
-
-      </xsl:attribute>
+      <xsl:attribute name = "href"><xsl:value-of select = "$next_href_scaled" /></xsl:attribute>
 
       <xsl:attribute name = "title">
        <xsl:value-of select = "$next_title" />
@@ -2205,7 +2574,7 @@ __DATA__
     <xsl:attribute name = "href">
      <xsl:value-of select = "$this_page"/>
     </xsl:attribute>
-    original         
+    original
    </a>
    </span>
   </xsl:if>
@@ -2235,7 +2604,7 @@ __DATA__
       <xsl:call-template name = "Scale">
        <xsl:with-param name = "this_page" select = "$this_page" />
        <xsl:with-param name = "this_scale" select = "substring-before($str,',')" />
-      </xsl:call-template>          
+      </xsl:call-template>
      </xsl:if>
 
      <xsl:call-template name = "_Links">
@@ -2246,12 +2615,14 @@ __DATA__
 
     </xsl:when>
     <xsl:otherwise>
+
      <xsl:if test = "$str != $current_scale">
       <xsl:call-template name = "Scale">
        <xsl:with-param name = "this_page" select = "$this_page" />
        <xsl:with-param name = "this_scale" select = "$str" />
-      </xsl:call-template>        
+      </xsl:call-template>
      </xsl:if>
+
     </xsl:otherwise>
   </xsl:choose>
  </xsl:template>
@@ -2274,7 +2645,7 @@ __DATA__
  </xsl:template>
 
 <!-- ======================================================================
-     $Date: 2002/07/24 03:29:55 $
+     $Date: 2002/07/31 17:45:31 $
      ====================================================================== -->
 
 </xsl:stylesheet>
